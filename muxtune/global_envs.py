@@ -6,4 +6,4 @@ import enum
 
 
 class PeftType(enum.Enum):
-    LORA = enum.auto()
+    LoRA = enum.auto()

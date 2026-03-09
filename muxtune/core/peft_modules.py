@@ -4,7 +4,8 @@
 
 """ Basic modules for PEFT abstraction. """
 
-from typing import List
+from typing import List, Tuple, Optional, Union
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
 import torch
@@ -12,46 +13,77 @@ from torch import nn
 
 from muxtune.global_envs import PeftType
 
-__all__ = [ "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
+__all__ = [ "PeftModuleConfig", "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
 
 
-class PeftModule(nn.Module, ABC):
-    """ Base class for PEFT module, including adapter, dispatch (input) and aggregate (output) rules, 
-    and base op (of the LLM backbone). 
-    
-    Args:
-        peft_type: The type of PEFT module (e.g., LoRA).
-        base_op: The targeted operator of the LLM backbone for adapter attachment.
-    """
+@dataclass
+class PeftModuleConfig:
+    """ General PEFT module configurations. """
 
-    def __init__(self, peft_type: PeftType, base_op: nn.Module):
-        super(PeftModule, self).__init__()
+    peft_type: PeftType = None
+    """ The type of PEFT module (e.g., LoRA). """
 
-        self.type = peft_type
+    module_name: str = None
+    """ Unique identifier of the PeftModule, in the format of:
+    "[base_op_module_name]" (e.g., "qkv_proj"). """
+
+    device: str = "cuda"
+    """ The device string of the PEFT module parameters. """ 
+
+    dtype: torch.dtype = torch.float16
+    """ The data type of the PEFT module parameters. """
+
+
+class PeftModule:
+    """ PEFT module class, including adapter, dispatch (input) and aggregate (output) rules, 
+    and base op (of the LLM backbone). """
+
+    def __init__(self, config: PeftModuleConfig, base_op: nn.Module):
+        self.config = config
         self.base_op = base_op
-        self.adapter = None
-        self.input_dispatcher = None
-        self.output_aggregator = None
-    
-    @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ Abstracted forward workflow. """
-        pass
+        self.adapters = {}  # adapter name -> adapter
+        self.input_dispatchers = {}
+        self.output_aggregators = {}
 
-    @abstractmethod
-    def define_adapter(self):
-        pass
+    def register_one_adapter(
+        self, adapter: "Adapter", input_dispatcher: "InputDispatcher", output_aggregator: "OutputAggregator",
+    ):
+        """ Register one adapter. """
+        adapter_name = adapter.name
+        self.adapters[adapter_name] = adapter
+        self.input_dispatchers[adapter_name] = input_dispatcher
+        self.output_aggregators[adapter_name] = output_aggregator
 
-    @abstractmethod
-    def define_input_dispatcher(self):
-        pass
+        assert self.adapters[adapter_name].device == self.config.device, \
+            f"Adapter ({adapter_name}) device {self.adapters[adapter_name].device} does not match PEFT module device {self.config.device}."
+        assert self.adapters[adapter_name].dtype == self.config.dtype, \
+            f"Adapter ({adapter_name}) dtype {self.adapters[adapter_name].dtype} does not match PEFT module dtype {self.config.dtype}."
     
+    def single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
+        """ Forward for a single adapter. """
+        adapter_in, base_in = self.input_dispatchers[adapter_name].dispatch(peft_in)
+        adapter_out = self.adapters[adapter_name](adapter_in) if adapter_in is not None else None
+        base_out = self.base_op(base_in) if base_in is not None else None
+        adapter_out = self.adapters[adapter_name](base_out) if adapter_out is None else adapter_out # maybe forward from base output
+        base_out = self.base_op(adapter_out) if base_out is None else base_out  # maybe forward from adapter output
+        return self.output_aggregators[adapter_name].aggregate(adapter_out, base_out)
+
 
 class Adapter(nn.Module, ABC):
-    """ Base class for adapter module. """
+    """ Base class for adapter module. 
+    
+    Args:
+        name: Unique identifier of the adapter, formatted as  
+            "[base_op_module_name]::[task_name]" (e.g., "qkv_proj::task_0").
+        device: Device string of the adapter.
+        dtype: Data type of adapter parameters.
+    """
 
-    def __init__(self):
-        super(Adapter, self).__init__()
+    def __init__(self, name: str, device: str, dtype: torch.dtype):
+        super().__init__()
+        self.name = name
+        self.device = device
+        self.dtype = dtype
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -62,10 +94,19 @@ class InputDispatcher(ABC):
     """ Base class for input dispatcher. """
 
     def __init__(self):
-        super(InputDispatcher, self).__init__()
+        super().__init__()
 
     @abstractmethod
-    def dispatch(self, x: torch.Tensor) -> torch.Tensor:
+    def dispatch(self, peft_in: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """ Dispatch the input tensor of PEFT module to adapter and LLM base operator. 
+
+        Args:
+            peft_in: The input tensor of PEFT module.
+        
+        Return:
+            A tuple of input tensors for adapter and base operator. If one of them is None, it means the 
+            corresponding input tensor comes from the output tensor of the other module.
+        """
         pass
 
 
@@ -73,8 +114,16 @@ class OutputAggregator(ABC):
     """ Base class for output aggregator. """
 
     def __init__(self):
-        super(OutputAggregator, self).__init__()
+        super().__init__()
 
     @abstractmethod
-    def aggregate(self, x: torch.Tensor) -> torch.Tensor:
+    def aggregate(self, adapter_out: Optional[torch.Tensor], base_out: Optional[torch.Tensor]) -> torch.Tensor:
+        """ Aggregate the output tensors of adapter and LLM base operator. 
+        
+        Args:
+            adapter_out: The output tensor of adapter. If None, it means the adapter output serves as 
+                the input tensor of base operator.
+            base_out: The output tensor of LLM base operator. If None, it means the base operator output 
+                serves as the input tensor of adapter.
+        """
         pass
