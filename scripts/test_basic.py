@@ -27,18 +27,23 @@ class BasicFuncTest(unittest.TestCase):
         from muxtune.global_envs import PeftType
 
         base_op = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
-        adapter = LoraAdapter("test_module::task_0", "cuda", torch.float16, lora_r=2, lora_alpha=4, in_features=4, out_features=4)
-        input_dispatcher = LoraInputDispatcher()
-        output_aggregator = LoraOutputAggregator()
-
-        config = PeftModuleConfig(peft_type=PeftType.LoRA, module_name="test_module", device="cuda", dtype=torch.float16)
+        config = PeftModuleConfig(PeftType.LoRA, "test_module", "cuda", torch.float16)
         peft_module = PeftModule(config, base_op)
-        peft_module.register_one_adapter(adapter, input_dispatcher, output_aggregator)
 
-        peft_in = torch.randn(2, 4, device="cuda", dtype=torch.float16)
-        peft_out = peft_module.single_forward("test_module::task_0", peft_in)
+        task_names = ["task_0", "task_1", ]
+        task_inputs = [
+            torch.randn(2, 4, device="cuda", dtype=torch.float16),
+            torch.randn(4, 4, device="cuda", dtype=torch.float16),
+        ]
+        for task_name in task_names:
+            adapter = LoraAdapter(f"test_module::{task_name}", "cuda", torch.float16, lora_r=2, lora_alpha=4, in_features=4, out_features=4)
+            input_dispatcher = LoraInputDispatcher()
+            output_aggregator = LoraOutputAggregator()
 
-        print("PEFT output:", peft_out)
+            peft_module.register_one_adapter(adapter, input_dispatcher, output_aggregator)
+
+        peft_out = peft_module.single_forward("test_module::task_0", task_inputs[0])
+        print("Single-task forward output", peft_out)
 
 
 if __name__ == '__main__':
