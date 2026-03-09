@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "muxtune"
+description = "MuxTune: A multi-task PEFT backend for LLM fine-tuning APIs [NSDI'26]."
+readme = "README.md"
+dynamic = [ "version", "dependencies" ]
+requires-python = ">=3.10"
+authors = [
+    {name = "Chunyu Xue", email = "dicardo@sjtu.edu.cn"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Development Status :: Beta",
+]
+
+[project.urls]
+Homepage = "https://github.com/sjtu-epcc/muxtune/"
+
+[tool.setuptools]
+dynamic.version.attr = "muxtune.__version__"
+dynamic.dependencies.file = "requirements.txt"
+
+# NOTE:
+packages.find.include = [ "muxtune*" ]
+package-data = { muxtune = [ "csrc/*.h", "csrc/*.cpp" ] }
