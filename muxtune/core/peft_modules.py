@@ -25,7 +25,7 @@ class PeftModuleConfig:
 
     module_name: str = None
     """ Unique identifier of the PeftModule, in the format of:
-    "[base_op_module_name]" (e.g., "qkv_proj"). """
+    "[base_op_module_name]::[peft_module_index]" (e.g., "qkv_proj::peft_module_0"). """
 
     device: str = "cuda"
     """ The device string of the PEFT module parameters. """ 
@@ -36,7 +36,11 @@ class PeftModuleConfig:
 
 class PeftModule:
     """ PEFT module class, including adapter, dispatch (input) and aggregate (output) rules, 
-    and base op (of the LLM backbone). """
+    and base op (of the LLM backbone). 
+    
+    NOTE: All adapters within the same PeftModule are spatially executed in a batched manner; 
+        all PeftModules are temporally scheduled.
+    """
 
     def __init__(self, config: PeftModuleConfig, base_op: nn.Module):
         self.config = config
@@ -60,7 +64,7 @@ class PeftModule:
             f"Adapter ({adapter.name}) dtype {self.adapters[adapter.name].dtype} does not match " + \
             f"PEFT module dtype {self.config.dtype}."
     
-    def single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
+    def _single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
         """ Forward a single adapter. """
 
         a_in, b_in = self.input_dispatchers[adapter_name].dispatch(peft_in)
@@ -69,6 +73,14 @@ class PeftModule:
         a_out = self.adapters[adapter_name](b_out) if a_out is None else a_out  # maybe forward from base output
         b_out = self.base_op(a_out) if b_out is None else b_out                 # maybe forward from adapter output
         return self.output_aggregators[adapter_name].aggregate(a_out, b_out)
+
+    def batched_forward(self, peft_in: torch.Tensor) -> torch.Tensor:
+        """ Forward all adapters in a batched manner. 
+        
+        Args:
+            peft_in (torch.Tensor): Multi-task input tensor batched along batch dimension.
+        """
+        raise NotImplementedError
 
 
 class Adapter(nn.Module, ABC):

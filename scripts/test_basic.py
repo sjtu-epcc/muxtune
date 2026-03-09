@@ -45,7 +45,7 @@ class BasicFuncTest(unittest.TestCase):
 
             peft_module.register_one_adapter(adapter, input_dispatcher, output_aggregator)
 
-        peft_out = peft_module.single_forward("test_module::task_0", task_inputs[0])
+        peft_out = peft_module._single_forward("test_module::task_0", task_inputs[0])
         print("Single-task forward output", peft_out)
 
 
