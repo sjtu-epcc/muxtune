@@ -36,7 +36,10 @@ class BasicFuncTest(unittest.TestCase):
             torch.randn(4, 4, device="cuda", dtype=torch.float16),
         ]
         for task_name in task_names:
-            adapter = LoraAdapter(f"test_module::{task_name}", "cuda", torch.float16, lora_r=2, lora_alpha=4, in_features=4, out_features=4)
+            adapter = LoraAdapter(
+                f"test_module::{task_name}", peft_module.config.device, peft_module.config.dtype, 
+                lora_r=2, lora_alpha=4, in_features=4, out_features=4,
+            )
             input_dispatcher = LoraInputDispatcher()
             output_aggregator = LoraOutputAggregator()
 

@@ -49,24 +49,26 @@ class PeftModule:
         self, adapter: "Adapter", input_dispatcher: "InputDispatcher", output_aggregator: "OutputAggregator",
     ):
         """ Register one adapter. """
-        adapter_name = adapter.name
-        self.adapters[adapter_name] = adapter
-        self.input_dispatchers[adapter_name] = input_dispatcher
-        self.output_aggregators[adapter_name] = output_aggregator
+        self.adapters[adapter.name] = adapter
+        self.input_dispatchers[adapter.name] = input_dispatcher
+        self.output_aggregators[adapter.name] = output_aggregator
 
-        assert self.adapters[adapter_name].device == self.config.device, \
-            f"Adapter ({adapter_name}) device {self.adapters[adapter_name].device} does not match PEFT module device {self.config.device}."
-        assert self.adapters[adapter_name].dtype == self.config.dtype, \
-            f"Adapter ({adapter_name}) dtype {self.adapters[adapter_name].dtype} does not match PEFT module dtype {self.config.dtype}."
+        assert self.adapters[adapter.name].device == self.config.device, \
+            f"Adapter ({adapter.name}) device {self.adapters[adapter.name].device} does not match " + \
+            f"PEFT module device {self.config.device}."
+        assert self.adapters[adapter.name].dtype == self.config.dtype, \
+            f"Adapter ({adapter.name}) dtype {self.adapters[adapter.name].dtype} does not match " + \
+            f"PEFT module dtype {self.config.dtype}."
     
     def single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
-        """ Forward for a single adapter. """
-        adapter_in, base_in = self.input_dispatchers[adapter_name].dispatch(peft_in)
-        adapter_out = self.adapters[adapter_name](adapter_in) if adapter_in is not None else None
-        base_out = self.base_op(base_in) if base_in is not None else None
-        adapter_out = self.adapters[adapter_name](base_out) if adapter_out is None else adapter_out # maybe forward from base output
-        base_out = self.base_op(adapter_out) if base_out is None else base_out  # maybe forward from adapter output
-        return self.output_aggregators[adapter_name].aggregate(adapter_out, base_out)
+        """ Forward a single adapter. """
+
+        a_in, b_in = self.input_dispatchers[adapter_name].dispatch(peft_in)
+        a_out = self.adapters[adapter_name](a_in) if a_in is not None else None
+        b_out = self.base_op(b_in) if b_in is not None else None
+        a_out = self.adapters[adapter_name](b_out) if a_out is None else a_out  # maybe forward from base output
+        b_out = self.base_op(a_out) if b_out is None else b_out                 # maybe forward from adapter output
+        return self.output_aggregators[adapter_name].aggregate(a_out, b_out)
 
 
 class Adapter(nn.Module, ABC):
