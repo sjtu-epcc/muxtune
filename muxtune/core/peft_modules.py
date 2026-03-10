@@ -105,6 +105,14 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         output_aggregator: "OutputAggregator",
     ) -> torch.Tensor:
         """ Forward function for batched PeftModule. """
+
+        ctx.save_for_backward(batched_peft_in)
+        ctx.split_sizes = split_sizes
+        ctx.peft_type = peft_type
+        ctx.base_op = base_op
+        ctx.adapters = adapters
+        ctx.input_dispatcher = input_dispatcher
+        ctx.output_aggregator = output_aggregator
         
         a_ins, b_ins = [], []
         peft_ins = torch.split(batched_peft_in, split_sizes, dim=0)
@@ -113,13 +121,21 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             a_ins.append(a_in)
             b_ins.append(b_in)
 
-        a_outs = batched_adapter_forward(peft_type, a_ins, adapters)
-        b_outs = batched_base_op_forward(base_op, b_ins, split_sizes)
+        a_outs = batched_adapter_forward(peft_type, a_ins, adapters) if a_in[0] is not None else None
+        b_outs = batched_base_op_forward(base_op, b_ins, split_sizes) if b_in[0] is not None else None
+        # maybe forward from the other module's output
+        a_outs = batched_adapter_forward(peft_type, b_outs, adapters) if a_outs is None else a_outs
+        b_outs = batched_base_op_forward(base_op, a_outs, split_sizes) if b_outs is None else b_outs
 
         outs = []
         for a_out, b_out in zip(a_outs, b_outs):
             out = output_aggregator.aggregate(a_out, b_out)
             outs.append(out)
+
+        ctx.a_ins = a_ins   # for backward pass
+        ctx.b_ins = b_ins
+        ctx.a_outs = a_outs
+        ctx.b_outs = b_outs
 
         return torch.cat(outs, dim=0)
 
@@ -128,7 +144,9 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         ctx, batched_grad_out: torch.Tensor,
     ) -> Tuple[torch.Tensor, None, None, None, None, None, None]:
         """ Backward function for batched PeftModule. """
-        raise NotImplementedError
+        
+        batched_peft_in, = ctx.saved_tensors
+        grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
 
 
 class Adapter(nn.Module, ABC):
@@ -170,6 +188,21 @@ class InputDispatcher(ABC):
         """
         pass
 
+    @abstractmethod
+    def reversed_dispatch(self, adapter_grad_in: Optional[torch.Tensor], base_grad_in: Optional[torch.Tensor]) -> torch.Tensor:
+        """ Reversed dispatch by aggregating gradients from adapter and LLM base operator.
+
+        Args:
+            adapter_grad_in: The gradient tensor of adapter. If None, it means adapter input comes 
+                from the output tensor of base operator.
+            base_grad_in: The gradient tensor of LLM base operator. If None, it means base operator 
+                input comes from the output tensor of adapter.
+        
+        Return:
+            The gradient to be propagated to the previous operator.
+        """
+        pass
+
 
 class OutputAggregator(ABC):
     """ Base class for output aggregator. """
@@ -186,5 +219,18 @@ class OutputAggregator(ABC):
                 the input tensor of base operator.
             base_out: The output tensor of LLM base operator. If None, it means the base operator output 
                 serves as the input tensor of adapter.
+        """
+        pass
+
+    @abstractmethod
+    def reversed_aggregate(self, grad_out: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """ Reversed aggregate by splitting the gradient to adapter and LLM base operator. 
+
+        Args:
+            grad_out: The gradient tensor of the aggregated output.
+        
+        Return:
+            A tuple of gradient tensors for adapter and base operator. If one of them is None, it means the 
+            corresponding output serves as the input tensor of the other module.
         """
         pass

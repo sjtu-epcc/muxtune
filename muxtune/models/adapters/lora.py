@@ -58,6 +58,9 @@ class LoraInputDispatcher(InputDispatcher):
 
     def dispatch(self, peft_in: torch.Tensor) -> Union[torch.Tensor, torch.Tensor]:
         return peft_in, peft_in     # adapter and base op share the same input
+    
+    def reversed_dispatch(self, adapter_grad_in, base_grad_in):
+        return adapter_grad_in + base_grad_in   # the input gradient is the sum of adapter and base op input gradients
 
 
 class LoraOutputAggregator(OutputAggregator):
@@ -68,3 +71,6 @@ class LoraOutputAggregator(OutputAggregator):
 
     def aggregate(self, adapter_out: torch.Tensor, base_out: torch.Tensor) -> torch.Tensor:
         return adapter_out + base_out   # adapter output is added to the base op output
+
+    def reversed_aggregate(self, grad_out: torch.Tensor) -> Union[torch.Tensor, torch.Tensor]:
+        return grad_out, grad_out   # the output gradient is propagated to both adapter and base op
