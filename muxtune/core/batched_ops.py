@@ -48,16 +48,13 @@ def _batched_lora_forward(
     assert all([inputs[i].dtype == adapters[i].dtype for i in range(len(inputs))]), \
         "Input dtypes do not match adapter dtypes."
     
-    # Dropout 
-    for adapter in adapters:
-        inputs = [adapter.dropout(input_) for input_ in inputs]
-    
-    print(inputs[0].shape, adapters[0].lora_A.weight.T.shape)
-    print(inputs[1].shape, adapters[1].lora_A.weight.T.shape)
-    
+    # Dropout
+    inputs = [adapter.dropout(input_) for input_, adapter in zip(inputs, adapters)]
     # Lora A
-    lora_a_outs = triton_grouped_gemm(inputs, [adapter.lora_A.weight.T for adapter in adapters])
+    lora_a_outs = triton_grouped_gemm(inputs, [adapter.lora_A.weight.T.contiguous() for adapter in adapters])
+    # Lora B
+    lora_b_outs = triton_grouped_gemm(lora_a_outs, [adapter.lora_B.weight.T.contiguous() for adapter in adapters])
+    # Scaling
+    scaled_lora_outs = [lora_b_out * adapter.scaling for lora_b_out, adapter in zip(lora_b_outs, adapters)]
 
-    print(lora_a_outs)
-
-    exit(0)
+    return scaled_lora_outs

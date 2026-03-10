@@ -50,6 +50,12 @@ def num_sms():
 @triton.autotune(
     configs=[
         triton.Config({
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 16,
+            'BLOCK_SIZE_K': 16,
+            'NUM_SM': 84,
+        }),
+        triton.Config({
             'BLOCK_SIZE_M': 128,
             'BLOCK_SIZE_N': 128,
             'BLOCK_SIZE_K': 32,
@@ -119,6 +125,7 @@ def grouped_matmul_kernel(
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = num_m_tiles * num_n_tiles
+        
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
             # pick up a tile from the current gemm problem
@@ -134,10 +141,23 @@ def grouped_matmul_kernel(
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
             tile_n_idx = tile_idx_in_gemm % num_n_tiles
 
+            # effective range of this tile
+            m_start = tile_m_idx * BLOCK_SIZE_M
+            m_end = m_start + BLOCK_SIZE_M
+            m_end = tl.where(m_end > gm, gm, m_end)
+            n_start = tile_n_idx * BLOCK_SIZE_N
+            n_end = n_start + BLOCK_SIZE_N
+            n_end = tl.where(n_end > gn, gn, n_end)
+            k_total = gk
+
             # do regular gemm here
-            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_am = m_start + tl.arange(0, BLOCK_SIZE_M)
+            offs_bn = n_start + tl.arange(0, BLOCK_SIZE_N)
             offs_k = tl.arange(0, BLOCK_SIZE_K)
+            mask_am = offs_am < gm
+            mask_bn = offs_bn < gn
+            mask_k = offs_k < k_total
+
             a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
             b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -146,19 +166,17 @@ def grouped_matmul_kernel(
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
                 # assume full tile for now
-                a = tl.load(a_ptrs)
-                b = tl.load(b_ptrs)
+                a = tl.load(a_ptrs, mask=mask_am[:, None] & mask_k[None, :], other=0.0)
+                b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_bn[None, :], other=0.0)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
             c = accumulator.to(tl.float16)
 
-            offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_cm = m_start + tl.arange(0, BLOCK_SIZE_M)
+            offs_cn = n_start + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
-
-            # assumes full tile for now
-            tl.store(c_ptrs, c)
+            tl.store(c_ptrs, c, mask=mask_am[:, None] & mask_bn[None, :])
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
@@ -177,6 +195,9 @@ def triton_grouped_gemm(group_A, group_B):
     Return:
         A list of 2D tensors. Each tensor is the output of a GEMM.
     """
+    
+    for A, B in zip(group_A, group_B):
+        assert A.is_contiguous() and B.is_contiguous(), "Input tensors must be contiguous."
 
     assert len(group_A) == len(group_B)
     group_size = len(group_A)
