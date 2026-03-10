@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 import torch
 from torch import nn
 
+from muxtune.core.batched_ops import batched_base_op_forward, batched_adapter_forward
 from muxtune.global_envs import PeftType
 
 __all__ = [ "PeftModuleConfig", "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
@@ -26,6 +27,12 @@ class PeftModuleConfig:
     module_name: str = None
     """ Unique identifier of the PeftModule, in the format of:
     "[base_op_module_name]::[peft_module_index]" (e.g., "qkv_proj::peft_module_0"). """
+
+    input_dispatcher: "InputDispatcher" = None
+    """ Input dispatcher for the PEFT module. """
+
+    output_aggregator: "OutputAggregator" = None
+    """ Output aggregator for the PEFT module. """
 
     device: str = "cuda"
     """ Device string of the PEFT module parameters. """ 
@@ -46,16 +53,17 @@ class PeftModule:
         self.config = config
         self.base_op = base_op
         self.adapters = {}  # adapter name -> adapter
-        self.input_dispatchers = {}
-        self.output_aggregators = {}
+        self.input_dispatcher = config.input_dispatcher
+        self.output_aggregator = config.output_aggregator
 
-    def register_one_adapter(
-        self, adapter: "Adapter", input_dispatcher: "InputDispatcher", output_aggregator: "OutputAggregator",
-    ):
+        self.microbatch_sizes = []
+        self.ordered_adapter_names = []
+
+    def register_one_adapter(self, adapter: "Adapter", microbatch_size: int):
         """ Register one adapter. """
         self.adapters[adapter.name] = adapter
-        self.input_dispatchers[adapter.name] = input_dispatcher
-        self.output_aggregators[adapter.name] = output_aggregator
+        self.microbatch_sizes.append(microbatch_size)
+        self.ordered_adapter_names.append(adapter.name)
 
         assert self.adapters[adapter.name].device == self.config.device, \
             f"Adapter ({adapter.name}) device {self.adapters[adapter.name].device} does not match " + \
@@ -65,21 +73,61 @@ class PeftModule:
             f"PEFT module dtype {self.config.dtype}."
     
     def _single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
-        """ Forward a single adapter. """
+        """ Forward a single adapter (and its base op). """
 
-        a_in, b_in = self.input_dispatchers[adapter_name].dispatch(peft_in)
+        a_in, b_in = self.input_dispatcher.dispatch(peft_in)
         a_out = self.adapters[adapter_name](a_in) if a_in is not None else None
         b_out = self.base_op(b_in) if b_in is not None else None
         a_out = self.adapters[adapter_name](b_out) if a_out is None else a_out  # maybe forward from base output
         b_out = self.base_op(a_out) if b_out is None else b_out                 # maybe forward from adapter output
-        return self.output_aggregators[adapter_name].aggregate(a_out, b_out)
+        return self.output_aggregator.aggregate(a_out, b_out)
 
-    def batched_forward(self, peft_in: torch.Tensor) -> torch.Tensor:
-        """ Forward all adapters in a batched manner. 
+    def batched_forward(self, batched_peft_in: torch.Tensor) -> torch.Tensor:
+        """ Forward all adapters (and their base ops) in a batched manner. 
         
         Args:
-            peft_in (torch.Tensor): Multi-task input tensor batched along batch dimension.
+            batched_peft_in: Multi-adapter input tensor batched along batch dimension.
         """
+        return _BatchedPeftModuleForwardWrapper.apply(
+            batched_peft_in, self.microbatch_sizes, self.config.peft_type, 
+            self.base_op, [self.adapters[name] for name in self.ordered_adapter_names], 
+            self.input_dispatcher, self.output_aggregator,
+        )
+
+        
+class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
+    """ Batched forward wrapper for PeftModule. """
+
+    @staticmethod
+    def forward(
+        ctx, batched_peft_in: torch.Tensor, split_sizes: List[int], peft_type: PeftType,
+        base_op: nn.Module, adapters: List["Adapter"], input_dispatcher: "InputDispatcher", 
+        output_aggregator: "OutputAggregator",
+    ) -> torch.Tensor:
+        """ Forward function for batched PeftModule. """
+        
+        a_ins, b_ins = [], []
+        peft_ins = torch.split(batched_peft_in, split_sizes, dim=0)
+        for peft_in in peft_ins:
+            a_in, b_in = input_dispatcher.dispatch(peft_in)
+            a_ins.append(a_in)
+            b_ins.append(b_in)
+
+        a_outs = batched_adapter_forward(peft_type, a_ins, adapters)
+        b_outs = batched_base_op_forward(base_op, b_ins, split_sizes)
+
+        outs = []
+        for a_out, b_out in zip(a_outs, b_outs):
+            out = output_aggregator.aggregate(a_out, b_out)
+            outs.append(out)
+
+        return torch.cat(outs, dim=0)
+
+    @staticmethod
+    def backward(
+        ctx, batched_grad_out: torch.Tensor,
+    ) -> Tuple[torch.Tensor, None, None, None, None, None, None]:
+        """ Backward function for batched PeftModule. """
         raise NotImplementedError
 
 
@@ -87,8 +135,7 @@ class Adapter(nn.Module, ABC):
     """ Base class for adapter module. 
     
     Args:
-        name: Unique identifier of the adapter, formatted as  
-            "[base_op_module_name]::[task_name]" (e.g., "qkv_proj::task_0").
+        name: Unique identifier of the adapter: "[base_op_module_name]::[task_name]" ("qkv_proj::task_0").
         device: Device string of the adapter.
         dtype: Data type of adapter parameters.
     """
