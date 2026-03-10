@@ -28,6 +28,19 @@ def batched_base_op_forward(
 
 
 @torch.no_grad()
+def batched_base_op_backward(
+    base_op: nn.Module, outputs: List[torch.Tensor], batched_input: torch.Tensor, 
+    grad_outputs: List[torch.Tensor], split_sizes: List[int],
+) -> List[torch.Tensor]:
+    """ Batched backward for base op with multi-adapter grad outputs. """
+
+    batched_grad_out = torch.cat(grad_outputs, dim=0)
+    batched_output = torch.cat(outputs, dim=0)
+    batched_grad_in = torch.autograd.grad([batched_output], inputs=[batched_input], grad_outputs=[batched_grad_out])[0]
+    return torch.split(batched_grad_in, split_sizes, dim=0)
+
+
+@torch.no_grad()
 def batched_adapter_forward(
     peft_type: PeftType, inputs: List[torch.Tensor], adapters: List[nn.Module], 
 ) -> List[torch.Tensor]:

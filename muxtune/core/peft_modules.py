@@ -11,7 +11,8 @@ from abc import ABC, abstractmethod
 import torch
 from torch import nn
 
-from muxtune.core.batched_ops import batched_base_op_forward, batched_adapter_forward
+from muxtune.core.batched_ops import (
+    batched_base_op_forward, batched_base_op_backward, batched_adapter_forward)
 from muxtune.global_envs import PeftType
 
 __all__ = [ "PeftModuleConfig", "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
@@ -147,6 +148,19 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         
         batched_peft_in, = ctx.saved_tensors
         grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
+
+        a_grad_outs, b_grad_outs = [], []
+        for grad_out in grad_outs:
+            a_grad_out, b_grad_out = ctx.output_aggregator.reversed_aggregate(grad_out)
+            a_grad_outs.append(a_grad_out)
+            b_grad_outs.append(b_grad_out)
+        
+        b_grad_ins = batched_base_op_backward(
+            base_op=ctx.base_op, outputs=ctx.b_outs, batched_input=torch.cat(ctx.b_ins, dim=0),
+            grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes,
+        )
+
+        raise NotImplementedError
 
 
 class Adapter(nn.Module, ABC):
