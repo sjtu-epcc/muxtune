@@ -21,17 +21,17 @@ class PeftModuleConfig:
     """ General PEFT module configurations. """
 
     peft_type: PeftType = None
-    """ The type of PEFT module (e.g., LoRA). """
+    """ PEFT module type (e.g., LoRA). """
 
     module_name: str = None
     """ Unique identifier of the PeftModule, in the format of:
     "[base_op_module_name]::[peft_module_index]" (e.g., "qkv_proj::peft_module_0"). """
 
     device: str = "cuda"
-    """ The device string of the PEFT module parameters. """ 
+    """ Device string of the PEFT module parameters. """ 
 
     dtype: torch.dtype = torch.float16
-    """ The data type of the PEFT module parameters. """
+    """ Data type of the PEFT module parameters. """
 
 
 class PeftModule:
