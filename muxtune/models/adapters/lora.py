@@ -47,7 +47,8 @@ class LoraAdapter(Adapter):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dtype == self.dtype, f"Input dtype {x.dtype} does not match adapter dtype {self.dtype}."
-        return self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
+        # return self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
+        return self.lora_B(self.lora_A(x)) * self.scaling
 
 
 class LoraInputDispatcher(InputDispatcher):

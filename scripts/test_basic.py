@@ -37,6 +37,10 @@ class BasicFuncTest(unittest.TestCase):
             torch.randn(2, 4, device="cuda", dtype=torch.float16),
             torch.randn(4, 4, device="cuda", dtype=torch.float16),
         ]
+        task_labels = [
+            torch.randn(2, 4, device="cuda", dtype=torch.float16),
+            torch.randn(4, 4, device="cuda", dtype=torch.float16),
+        ]
         for i, task_name in enumerate(task_names):
             adapter = LoraAdapter(
                 f"test_module::{task_name}", peft_module.config.device, peft_module.config.dtype, 
@@ -45,15 +49,38 @@ class BasicFuncTest(unittest.TestCase):
 
             peft_module.register_one_adapter(adapter, task_inputs[i].shape[0])
 
+        optimizer_0 = torch.optim.Adam(peft_module.adapters["test_module::task_0"].parameters(), lr=1e-3)
+        optimizer_1 = torch.optim.Adam(peft_module.adapters["test_module::task_1"].parameters(), lr=1e-3)
+
         peft_out_0 = peft_module._single_forward("test_module::task_0", task_inputs[0])
         print(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
         peft_out_1 = peft_module._single_forward("test_module::task_1", task_inputs[1])
         print(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 
+        optimizer_0.zero_grad()
+        optimizer_1.zero_grad()
+
+        loss_0 = torch.nn.functional.mse_loss(peft_out_0, task_labels[0])
+        loss_1 = torch.nn.functional.mse_loss(peft_out_1, task_labels[1])
+        loss_0.backward()
+        loss_1.backward()
+
+        print(f"Single-task backward task_0 adapter grad: LoRA A: " + 
+              f"{peft_module.adapters['test_module::task_0'].lora_A.weight.grad} " + 
+              f"| LoRA B: {peft_module.adapters['test_module::task_0'].lora_B.weight.grad}\n\n")
+        print(f"Single-task backward task_1 adapter grad: LoRA A: " + 
+              f"{peft_module.adapters['test_module::task_1'].lora_A.weight.grad} " + 
+              f" | LoRA B: {peft_module.adapters['test_module::task_1'].lora_B.weight.grad}\n\n")
+
         batched_in = torch.cat(task_inputs, dim=0)
         batched_out = peft_module.batched_forward(batched_in)
         print(f"Multi-task batched forward output: {batched_out}")
+
+        optimizer_0.zero_grad()
+        optimizer_1.zero_grad()
+
+        
 
 
 if __name__ == '__main__':

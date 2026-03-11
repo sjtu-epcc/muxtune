@@ -59,7 +59,7 @@ class PeftModule:
 
         self.microbatch_sizes = []
         self.ordered_adapter_names = []
-
+        
     def register_one_adapter(self, adapter: "Adapter", microbatch_size: int):
         """ Register one adapter. """
         self.adapters[adapter.name] = adapter
@@ -95,7 +95,7 @@ class PeftModule:
             self.input_dispatcher, self.output_aggregator,
         )
 
-        
+
 class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     """ Batched forward wrapper for PeftModule. """
 
