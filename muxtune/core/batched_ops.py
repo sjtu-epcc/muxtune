@@ -30,14 +30,12 @@ def batched_base_op_forward(
 
 @torch.no_grad()
 def batched_base_op_backward(
-    outputs: List[torch.Tensor], inputs: List[torch.Tensor], grad_outputs: List[torch.Tensor], split_sizes: List[int],
+    base_op: nn.Module, grad_outputs: List[torch.Tensor], split_sizes: List[int],
 ) -> List[torch.Tensor]:
     """ Batched backward for base op with multi-adapter grad outputs. """
     
-    batched_output = torch.cat(outputs, dim=0)
-    batched_input = torch.cat(inputs, dim=0)
     batched_grad_out = torch.cat(grad_outputs, dim=0)
-    batched_grad_in = torch.autograd.grad([batched_output], inputs=[batched_input], grad_outputs=[batched_grad_out])[0]
+    batched_grad_in = torch.matmul(batched_grad_out, base_op.weight.contiguous())
     return torch.split(batched_grad_in, split_sizes, dim=0)
 
 
@@ -55,13 +53,12 @@ def batched_adapter_forward(
 
 @torch.no_grad()
 def batched_adapter_backward(
-    ctx, peft_type: PeftType, outputs: List[torch.Tensor], inputs: List[torch.Tensor], grad_outputs: List[torch.Tensor], 
-    adapters: List[nn.Module], 
+    ctx, peft_type: PeftType, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
 ) -> List[torch.Tensor]:
     """ Batched backward for adapters of the same PEFT type. """
 
     if peft_type == PeftType.LoRA:
-        return _batched_lora_backward(ctx, outputs, inputs, grad_outputs, adapters)
+        return _batched_lora_backward(ctx, adapters, grad_outputs)
     else:
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched backward.")
 
@@ -74,22 +71,46 @@ def _batched_lora_forward(
 
     assert all([inputs[i].dtype == adapters[i].dtype for i in range(len(inputs))]), \
         "Input dtypes do not match adapter dtypes."
-    inputs = [adapter.dropout(input_) for input_, adapter in zip(inputs, adapters)]
+    
+    # dropout_keep_probs = [1 - adapter.dropout.p for adapter in adapters]
+    # dropout_masks = [
+    #     torch.bernoulli(torch.full_like(input_, keep_prob))     
+    #         for input_, keep_prob in zip(inputs, dropout_keep_probs)
+    # ]
+    # inputs = [(input_ * mask) / keep_prob for input_, mask, keep_prob in zip(inputs, dropout_masks, dropout_keep_probs)]
+    # TODO(chunyu): Currently we skip dropout. 
     lora_a_outs = triton_grouped_gemm(inputs, [adapter.lora_A.weight.T.contiguous() for adapter in adapters])
     lora_b_outs = triton_grouped_gemm(lora_a_outs, [adapter.lora_B.weight.T.contiguous() for adapter in adapters])
     scaled_lora_outs = [lora_b_out * adapter.scaling for lora_b_out, adapter in zip(lora_b_outs, adapters)]
-    ctx.lora_a_outs = lora_a_outs   # for backward pass
+    # ctx.lora_dropout_masks = dropout_masks   # for backward pass
+    # ctx.lora_keep_probs = dropout_keep_probs
+    ctx.lora_a_ins = inputs
+    ctx.lora_a_outs = lora_a_outs
     return scaled_lora_outs
 
 
 @torch.no_grad()
 def _batched_lora_backward(
-    ctx, outputs: List[torch.Tensor], inputs: List[torch.Tensor], grad_outputs: List[torch.Tensor], 
-    adapters: List[nn.Module], 
+    ctx, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """ Batched backward for LoRA adapters. """
 
     lora_b_grad_outs = [grad_out / adapter.scaling for grad_out, adapter in zip(grad_outputs, adapters)]
     lora_b_grad_ins = triton_grouped_gemm(lora_b_grad_outs, [adapter.lora_B.weight.contiguous() for adapter in adapters])
-    lora_b_grad_weights = triton_grouped_gemm(lora_b_grad_outs, [adapter.lora_A.weight.contiguous() for adapter in adapters])
+    lora_b_grad_weights = triton_grouped_gemm([out.T.contiguous() for out in ctx.lora_a_outs], lora_b_grad_outs)
+    lora_a_grad_ins = triton_grouped_gemm(lora_b_grad_ins, [adapter.lora_A.weight.contiguous() for adapter in adapters])
+    lora_a_grad_weights = triton_grouped_gemm([inp.T.contiguous() for inp in ctx.lora_a_ins], lora_b_grad_ins)
+    # accumulate gradient buffers
+    for adapter, lora_a_grad_weight, lora_b_grad_weight in zip(adapters, lora_a_grad_weights, lora_b_grad_weights):
+        if adapter.lora_A.weight.grad is None:
+            adapter.lora_A.weight.grad = lora_a_grad_weight.to(
+                device=adapter.lora_A.weight.device, dtype=adapter.lora_B.weight.dtype)
+        else:
+            adapter.lora_A.weight.grad += lora_a_grad_weight
+        if adapter.lora_B.weight.grad is None:
+            adapter.lora_B.weight.grad = lora_b_grad_weight.to(
+                device=adapter.lora_B.weight.device, dtype=adapter.lora_B.weight.dtype)
+        else:
+            adapter.lora_B.weight.grad += lora_b_grad_weight
 
+    return lora_a_grad_ins

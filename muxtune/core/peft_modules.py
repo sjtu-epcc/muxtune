@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from muxtune.core.batched_ops import (
-    batched_base_op_forward, batched_base_op_backward, batched_adapter_forward)
+    batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
 from muxtune.global_envs import PeftType
 
 __all__ = [ "PeftModuleConfig", "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
@@ -107,9 +107,9 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     ) -> torch.Tensor:
         """ Forward function for batched PeftModule. """
 
-        ctx.save_for_backward(batched_peft_in)
         ctx.split_sizes = split_sizes
         ctx.peft_type = peft_type
+        ctx.base_op = base_op
         ctx.adapters = adapters
         ctx.input_dispatcher = input_dispatcher
         ctx.output_aggregator = output_aggregator
@@ -133,9 +133,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             outs.append(out)
 
         ctx.a_ins = a_ins   # for backward pass
-        ctx.b_ins = b_ins
         ctx.a_outs = a_outs
-        ctx.b_outs = b_outs
 
         return torch.cat(outs, dim=0)
 
@@ -145,7 +143,6 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, None, None, None, None, None, None]:
         """ Backward function for batched PeftModule. """
         
-        batched_peft_in, = ctx.saved_tensors
         grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
 
         a_grad_outs, b_grad_outs = [], []
@@ -154,11 +151,15 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             a_grad_outs.append(a_grad_out)
             b_grad_outs.append(b_grad_out)
         
-        b_grad_ins = batched_base_op_backward(
-            outputs=ctx.b_outs, inputs=ctx.b_ins, grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes,
-        )
+        b_grad_ins = batched_base_op_backward(ctx.base_op, grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes)
+        a_grad_ins = batched_adapter_backward(ctx, ctx.peft_type, ctx.adapters, grad_outputs=a_grad_outs)
 
-        raise NotImplementedError
+        grad_ins = []
+        for a_grad_in, b_grad_in in zip(a_grad_ins, b_grad_ins):
+            grad_in = ctx.input_dispatcher.reversed_dispatch(a_grad_in, b_grad_in)
+            grad_ins.append(grad_in)
+
+        return torch.cat(grad_ins, dim=0), None, None, None, None, None, None
 
 
 class Adapter(nn.Module, ABC):
