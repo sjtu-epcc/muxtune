@@ -110,7 +110,6 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         ctx.save_for_backward(batched_peft_in)
         ctx.split_sizes = split_sizes
         ctx.peft_type = peft_type
-        ctx.base_op = base_op
         ctx.adapters = adapters
         ctx.input_dispatcher = input_dispatcher
         ctx.output_aggregator = output_aggregator
@@ -122,10 +121,10 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             a_ins.append(a_in)
             b_ins.append(b_in)
 
-        a_outs = batched_adapter_forward(peft_type, a_ins, adapters) if a_in[0] is not None else None
+        a_outs = batched_adapter_forward(ctx, peft_type, a_ins, adapters) if a_in[0] is not None else None
         b_outs = batched_base_op_forward(base_op, b_ins, split_sizes) if b_in[0] is not None else None
         # maybe forward from the other module's output
-        a_outs = batched_adapter_forward(peft_type, b_outs, adapters) if a_outs is None else a_outs
+        a_outs = batched_adapter_forward(ctx, peft_type, b_outs, adapters) if a_outs is None else a_outs
         b_outs = batched_base_op_forward(base_op, a_outs, split_sizes) if b_outs is None else b_outs
 
         outs = []
@@ -156,8 +155,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             b_grad_outs.append(b_grad_out)
         
         b_grad_ins = batched_base_op_backward(
-            base_op=ctx.base_op, outputs=ctx.b_outs, batched_input=torch.cat(ctx.b_ins, dim=0),
-            grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes,
+            outputs=ctx.b_outs, inputs=ctx.b_ins, grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes,
         )
 
         raise NotImplementedError
