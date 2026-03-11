@@ -15,7 +15,8 @@ class BackwardThrottler(nn.Module):
     for multiple adapters. For each adapter, its loss is seperately computed, while 
     the remaining backward pass is concurrently executed with other batched adapters.
 
-    This module should be inserted before the final output layer of LLM backbone.
+    This module should be inserted before the final output layer of LLM backbone, called
+    at its post backward hook.
     """
 
     def __init__(self):
@@ -33,6 +34,14 @@ class BackwardThrottler(nn.Module):
         self.detached_output_tensors[microbatch_index] = detached_output_tensor
         return detached_output_tensor
 
-    def batched_backward(self, microbatch_index: int) -> torch.Tensor:
-        raise NotImplementedError        
+    def batched_backward(self, microbatch_index: int) -> None:
+        last_output_tensor = self.last_output_tensors[microbatch_index]
+        detached_output_tensor = self.detached_output_tensors[microbatch_index]
+        assert detached_output_tensor.grad is not None, \
+            "No gradient accumulated to the detached output tensor in BackwardThrottler."
+        
+        torch.autograd.backward(last_output_tensor, grad_tensors=detached_output_tensor.grad)
+        del self.last_output_tensors[microbatch_index]
+        del self.detached_output_tensors[microbatch_index]
+
     

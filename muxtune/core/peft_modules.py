@@ -4,9 +4,12 @@
 
 """ Basic modules for PEFT abstraction. """
 
+import os
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
+import functools
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 
 import torch
 from torch import nn
@@ -15,7 +18,10 @@ from muxtune.core.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
 from muxtune.global_envs import PeftType
 
-__all__ = [ "PeftModuleConfig", "PeftModule", "Adapter", "InputDispatcher", "OutputAggregator" ]
+__all__ = [
+    "PeftModuleConfig", "PeftModuleGroup", "PeftModule", 
+    "Adapter", "InputDispatcher", "OutputAggregator",
+]
 
 
 @dataclass
@@ -42,17 +48,86 @@ class PeftModuleConfig:
     """ Data type of the PEFT module parameters. """
 
 
+class PeftModuleGroup:
+    """ A group of PEFT modules on a single base operator. """
+
+    def __init__(self):
+        self.base_op = None
+        self.peft_modules = {}  # peft module name -> peft module
+
+    def add_peft_module(self, peft_module: "PeftModule"):
+        assert self.base_op is not None, \
+            "Base operator should be hooked before adding PEFT modules."
+        assert peft_module.config.module_name not in self.peft_modules, \
+            f"PEFT module name {peft_module.config.module_name} already exists in the group."
+        
+        peft_module.register_base_op(self.base_op)
+        self.peft_modules[peft_module.config.module_name] = peft_module
+
+    def hook_to_base_op(
+        self, base_op: nn.Module, attr_name: str = "peft_module_group", 
+        prev_fw_func_name: str = "prev_fw_func",
+    ) -> nn.Module:
+        """ Hook to the base operator. 
+        
+        Args:
+            base_op: The base operator module to be hooked.
+            attr_name: The attribute name of the PEFT module group (default: "peft_module_group").
+            prev_fw_func_name: The attribute name of the original forward function of the 
+                base operator, after the PeftModuleGroup is hooked (default: "prev_fw_func").
+        """
+        assert self.base_op is None, "PEFT module group has already been hooked."
+        setattr(base_op, attr_name, self)
+        setattr(base_op, prev_fw_func_name, base_op.forward)
+        self.base_op = base_op
+        
+        def __hooked_forward(module, *args, **kwargs) -> OrderedDict:
+            peft_module_group = getattr(module, attr_name)
+            input_tensors = args[0]
+            forced_adapter_name = str(os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None))
+            output_tensors = OrderedDict()
+            for peft_module_name, peft_module in peft_module_group.peft_modules.items():
+                peft_module_index = peft_module_name.split("_")[-1]
+                if forced_adapter_name is not None:
+                    output_tensor = peft_module._single_forward(
+                        forced_adapter_name, input_tensors[peft_module_index])
+                else:
+                    output_tensor = peft_module.batched_forward(input_tensors[peft_module_index])
+                output_tensors[peft_module_index] = output_tensor
+            
+            return output_tensors
+
+        # Overriding a GraphModuleImpl forward freezes the forward call and 
+        # later modifications on the graph will fail.
+        # Reference: https://pytorch.slack.com/archives/C3PDTEV8E/p1705929610405409
+        if "GraphModuleImpl" in str(type(base_op)):
+            base_op.__class__.forward = functools.update_wrapper(
+                functools.partial(__hooked_forward, base_op), 
+                getattr(base_op, prev_fw_func_name),
+            )
+        else:
+            base_op.forward = functools.update_wrapper(
+                functools.partial(__hooked_forward, base_op), 
+                getattr(base_op, prev_fw_func_name),
+            )
+
+        return base_op
+
+
 class PeftModule:
     """ PEFT module class, including adapter, dispatch (input) and aggregate (output) rules, 
     and base op (of the LLM backbone). 
     
-    NOTE: All adapters within the same PeftModule are spatially executed in a batched manner; 
-        all PeftModules are temporally scheduled.
+    All adapters within the same PeftModule are spatially executed in a batched manner; 
+    all PeftModules are temporally scheduled.
+
+    Args:
+        config: The configuration of the PEFT module.
     """
 
-    def __init__(self, config: PeftModuleConfig, base_op: nn.Module):
+    def __init__(self, config: PeftModuleConfig):
         self.config = config
-        self.base_op = base_op
+        self.base_op = None
         self.adapters = {}  # adapter name -> adapter
         self.input_dispatcher = config.input_dispatcher
         self.output_aggregator = config.output_aggregator
@@ -76,6 +151,11 @@ class PeftModule:
     def _single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
         """ Forward a single adapter (and its base op). """
 
+        print(adapter_name)
+        print(peft_in)
+        exit(0)
+
+        assert self.base_op is not None, "PeftModule is not hooked to a base operator."
         a_in, b_in = self.input_dispatcher.dispatch(peft_in)
         a_out = self.adapters[adapter_name](a_in) if a_in is not None else None
         b_out = self.base_op(b_in) if b_in is not None else None
@@ -89,11 +169,17 @@ class PeftModule:
         Args:
             batched_peft_in: Multi-adapter input tensor batched along batch dimension.
         """
+        assert self.base_op is not None, "PeftModule is not hooked to a base operator."
         return _BatchedPeftModuleForwardWrapper.apply(
             batched_peft_in, self.microbatch_sizes, self.config.peft_type, 
             self.base_op, [self.adapters[name] for name in self.ordered_adapter_names], 
             self.input_dispatcher, self.output_aggregator,
         )
+    
+    def register_base_op(self, base_op: nn.Module):
+        """ Register the base operator for this module. """
+        assert self.base_op is None, "Base operator has already been registered."
+        self.base_op = base_op
 
 
 class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
