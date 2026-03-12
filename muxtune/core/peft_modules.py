@@ -84,17 +84,18 @@ class PeftModuleGroup:
         def __hooked_forward(module, *args, **kwargs) -> OrderedDict:
             peft_module_group = getattr(module, attr_name)
             input_tensors = args[0]
-            forced_adapter_name = str(os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None))
+            forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
             output_tensors = OrderedDict()
             for peft_module_name, peft_module in peft_module_group.peft_modules.items():
                 peft_module_index = peft_module_name.split("_")[-1]
                 if forced_adapter_name is not None:
                     output_tensor = peft_module._single_forward(
-                        forced_adapter_name, input_tensors[peft_module_index])
+                        forced_adapter_name, input_tensors[peft_module_index], prev_fw_func_name)
                 else:
-                    output_tensor = peft_module.batched_forward(input_tensors[peft_module_index])
+                    output_tensor = peft_module.batched_forward(
+                        input_tensors[peft_module_index], prev_fw_func_name)
                 output_tensors[peft_module_index] = output_tensor
-            
+
             return output_tensors
 
         # Overriding a GraphModuleImpl forward freezes the forward call and 
@@ -148,32 +149,34 @@ class PeftModule:
             f"Adapter ({adapter.name}) dtype {self.adapters[adapter.name].dtype} does not match " + \
             f"PEFT module dtype {self.config.dtype}."
     
-    def _single_forward(self, adapter_name: str, peft_in: torch.Tensor) -> torch.Tensor:
+    def _single_forward(
+        self, adapter_name: str, peft_in: torch.Tensor, prev_fw_func_name: str = "forward",
+    ) -> torch.Tensor:
         """ Forward a single adapter (and its base op). """
 
-        print(adapter_name)
-        print(peft_in)
-        exit(0)
-
         assert self.base_op is not None, "PeftModule is not hooked to a base operator."
+        base_op_func = getattr(self.base_op, prev_fw_func_name)
         a_in, b_in = self.input_dispatcher.dispatch(peft_in)
         a_out = self.adapters[adapter_name](a_in) if a_in is not None else None
-        b_out = self.base_op(b_in) if b_in is not None else None
-        a_out = self.adapters[adapter_name](b_out) if a_out is None else a_out  # maybe forward from base output
-        b_out = self.base_op(a_out) if b_out is None else b_out                 # maybe forward from adapter output
+        b_out =base_op_func(b_in) if b_in is not None else None
+        a_out = self.adapters[adapter_name](b_out) if a_out is None else a_out  # maybe forward from other output
+        b_out = base_op_func(a_out) if b_out is None else b_out
         return self.output_aggregator.aggregate(a_out, b_out)
 
-    def batched_forward(self, batched_peft_in: torch.Tensor) -> torch.Tensor:
+    def batched_forward(
+            self, batched_peft_in: torch.Tensor, prev_fw_func_name: str = "forward",
+        ) -> torch.Tensor:
         """ Forward all adapters (and their base ops) in a batched manner. 
         
         Args:
             batched_peft_in: Multi-adapter input tensor batched along batch dimension.
         """
+        
         assert self.base_op is not None, "PeftModule is not hooked to a base operator."
         return _BatchedPeftModuleForwardWrapper.apply(
             batched_peft_in, self.microbatch_sizes, self.config.peft_type, 
             self.base_op, [self.adapters[name] for name in self.ordered_adapter_names], 
-            self.input_dispatcher, self.output_aggregator,
+            self.input_dispatcher, self.output_aggregator, prev_fw_func_name,
         )
     
     def register_base_op(self, base_op: nn.Module):
@@ -189,7 +192,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     def forward(
         ctx, batched_peft_in: torch.Tensor, split_sizes: List[int], peft_type: PeftType,
         base_op: nn.Module, adapters: List["Adapter"], input_dispatcher: "InputDispatcher", 
-        output_aggregator: "OutputAggregator",
+        output_aggregator: "OutputAggregator", prev_fw_func_name: str = "forward",
     ) -> torch.Tensor:
         """ Forward function for batched PeftModule. """
 
@@ -199,6 +202,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         ctx.adapters = adapters
         ctx.input_dispatcher = input_dispatcher
         ctx.output_aggregator = output_aggregator
+        ctx.prev_fw_func_name = prev_fw_func_name
         
         a_ins, b_ins = [], []
         peft_ins = torch.split(batched_peft_in, split_sizes, dim=0)
@@ -208,10 +212,12 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             b_ins.append(b_in)
 
         a_outs = batched_adapter_forward(ctx, peft_type, a_ins, adapters) if a_in[0] is not None else None
-        b_outs = batched_base_op_forward(base_op, b_ins, split_sizes) if b_in[0] is not None else None
+        b_outs = batched_base_op_forward(base_op, b_ins, split_sizes, prev_fw_func_name) \
+            if b_in[0] is not None else None
         # maybe forward from the other module's output
         a_outs = batched_adapter_forward(ctx, peft_type, b_outs, adapters) if a_outs is None else a_outs
-        b_outs = batched_base_op_forward(base_op, a_outs, split_sizes) if b_outs is None else b_outs
+        b_outs = batched_base_op_forward(base_op, a_outs, split_sizes, prev_fw_func_name) \
+            if b_outs is None else b_outs
 
         outs = []
         for a_out, b_out in zip(a_outs, b_outs):
@@ -226,7 +232,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx, batched_grad_out: torch.Tensor,
-    ) -> Tuple[torch.Tensor, None, None, None, None, None, None]:
+    ) -> Tuple[torch.Tensor, None, None, None, None, None, None, None]:
         """ Backward function for batched PeftModule. """
         
         grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
@@ -245,7 +251,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             grad_in = ctx.input_dispatcher.reversed_dispatch(a_grad_in, b_grad_in)
             grad_ins.append(grad_in)
 
-        return torch.cat(grad_ins, dim=0), None, None, None, None, None, None
+        return torch.cat(grad_ins, dim=0), None, None, None, None, None, None, None
 
 
 class Adapter(nn.Module, ABC):

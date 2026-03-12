@@ -76,14 +76,12 @@ class BasicFuncTest(unittest.TestCase):
         peft_out_1 = backbone(input_task_1)
         print(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 
-        exit(0)
-
         del os.environ["FORCED_ADAPTER_NAME_DEBUG"]
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
 
-        loss_0 = torch.nn.functional.mse_loss(peft_out_0, task_labels[0])
-        loss_1 = torch.nn.functional.mse_loss(peft_out_1, task_labels[1])
+        loss_0 = torch.nn.functional.mse_loss(peft_out_0["0"], task_labels[0])
+        loss_1 = torch.nn.functional.mse_loss(peft_out_1["0"], task_labels[1])
         loss_0.backward()
         loss_1.backward()
 
@@ -94,8 +92,8 @@ class BasicFuncTest(unittest.TestCase):
               f"{peft_module.adapters['peft_module_0::task_1'].lora_A.weight.grad} " + 
               f" | LoRA B: {peft_module.adapters['peft_module_0::task_1'].lora_B.weight.grad}\n\n")
 
-        batched_in = torch.cat(task_inputs, dim=0)
-        batched_out = peft_module.batched_forward(batched_in)
+        batched_in = OrderedDict({ "0": torch.cat(task_inputs, dim=0) })
+        batched_out = backbone(batched_in)
         print(f"Multi-task batched forward output: {batched_out}")
 
         optimizer_0.zero_grad()
