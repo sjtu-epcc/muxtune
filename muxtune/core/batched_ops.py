@@ -25,10 +25,6 @@ def batched_base_op_forward(
     """ Batched forward for base op with multi-adapter inputs. """
 
     base_op_func = getattr(base_op, prev_fw_func_name)
-
-    print(prev_fw_func_name)
-    print(base_op_func)
-
     batched_input = torch.cat(inputs, dim=0)
     batched_output = base_op_func(batched_input)
     return torch.split(batched_output, split_sizes, dim=0)

@@ -30,12 +30,11 @@ class BasicFuncTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.base_op = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
-                # self.output_layer = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
+                self.output_layer = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
 
             def forward(self, x):
                 act = self.base_op(x)
-                return act
-                # return self.output_layer(act)
+                return self.output_layer(act)
 
         backbone = DummyBackbone()
 
