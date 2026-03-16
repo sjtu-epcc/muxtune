@@ -9,13 +9,13 @@ from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 import functools
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 
 import torch
 from torch import nn
 
 from muxtune.core.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
+from muxtune.core.utils import MixedTensor
 from muxtune.global_envs import PeftType
 
 __all__ = [
@@ -33,7 +33,7 @@ class PeftModuleConfig:
 
     module_name: str = None
     """ Unique identifier of the PeftModule, in the format of:
-    "[base_op_module_name]::[peft_module_index]" (e.g., "qkv_proj::peft_module_0"). """
+    "[base_op_module_name]::[peft_module_name]" (e.g., "qkv_proj::peft_module_0"). """
 
     input_dispatcher: "InputDispatcher" = None
     """ Input dispatcher for the PEFT module. """
@@ -81,20 +81,20 @@ class PeftModuleGroup:
         setattr(base_op, prev_fw_func_name, base_op.forward)
         self.base_op = base_op
         
-        def __hooked_forward(module, *args, **kwargs) -> OrderedDict:
+        def __hooked_forward(module, *args, **kwargs) -> MixedTensor:
             peft_module_group = getattr(module, attr_name)
             input_tensors = args[0]
             forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
-            output_tensors = OrderedDict()
+            output_tensors = MixedTensor()
             for peft_module_name, peft_module in peft_module_group.peft_modules.items():
-                peft_module_index = int(peft_module_name.split("_")[-1])
+                peft_group_index = int(peft_module_name.split("_")[-1])
                 if forced_adapter_name is not None:
                     output_tensor = peft_module._single_forward(
-                        forced_adapter_name, input_tensors[peft_module_index], prev_fw_func_name)
+                        forced_adapter_name, input_tensors[peft_group_index], prev_fw_func_name)
                 else:
                     output_tensor = peft_module.batched_forward(
-                        input_tensors[peft_module_index], prev_fw_func_name)
-                output_tensors[peft_module_index] = output_tensor
+                        input_tensors[peft_group_index], prev_fw_func_name)
+                output_tensors[peft_group_index] = output_tensor
 
             return output_tensors
 
@@ -111,7 +111,6 @@ class PeftModuleGroup:
                 functools.partial(__hooked_forward, base_op), 
                 getattr(base_op, prev_fw_func_name),
             )
-
         return base_op
 
 

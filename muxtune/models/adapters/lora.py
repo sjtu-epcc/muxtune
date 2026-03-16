@@ -37,14 +37,6 @@ class LoraAdapter(Adapter):
         # Parameters
         self.lora_A = nn.Linear(in_features, lora_r, bias=False, device=torch.device(device), dtype=dtype)
         self.lora_B = nn.Linear(lora_r, out_features, bias=False, device=torch.device(device), dtype=dtype)
-        
-        def __backward_hook_lora_b(module, grad_input, grad_output):
-            print("Gradient output: of lora_B", grad_output)
-            print("Gradient input of lora_B:", grad_input)
-        
-        self.lora_B.register_full_backward_hook(__backward_hook_lora_b)
-        
-        
         if init_weights:
             # Initialize A the same way as the default for nn.Linear and B to zero
             nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))

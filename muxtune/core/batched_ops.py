@@ -97,15 +97,12 @@ def _batched_lora_backward(
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """ Batched backward for LoRA adapters. """
 
-    lora_b_grad_outs = [grad_out / adapter.scaling for grad_out, adapter in zip(grad_outputs, adapters)]
+    lora_b_grad_outs = [grad_out * adapter.scaling for grad_out, adapter in zip(grad_outputs, adapters)]
     lora_b_grad_ins = triton_grouped_gemm(lora_b_grad_outs, [adapter.lora_B.weight.contiguous() for adapter in adapters])
     lora_b_grad_weights = triton_grouped_gemm([out.T.contiguous() for out in ctx.lora_a_outs], lora_b_grad_outs)
     lora_a_grad_ins = triton_grouped_gemm(lora_b_grad_ins, [adapter.lora_A.weight.contiguous() for adapter in adapters])
     lora_a_grad_weights = triton_grouped_gemm([inp.T.contiguous() for inp in ctx.lora_a_ins], lora_b_grad_ins)
     
-    print(f"Batched gradient output of lora_B: {lora_b_grad_outs}")
-    print(f"Batched gradient input of lora_B: {lora_b_grad_ins}")
-
     # accumulate gradient buffers
     for adapter, lora_a_grad_weight, lora_b_grad_weight in zip(adapters, lora_a_grad_weights, lora_b_grad_weights):
         lora_a_grad_weight_ = lora_a_grad_weight.T.contiguous()

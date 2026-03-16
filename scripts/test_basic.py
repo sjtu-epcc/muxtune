@@ -7,7 +7,6 @@ from typing import Dict, Set, Any
 import unittest
 import logging
 from functools import partial
-from collections import OrderedDict
 import time
 import numpy as np
 
@@ -24,7 +23,7 @@ class BasicFuncTest(unittest.TestCase):
 
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
-        from muxtune.core.utils import BackwardThrottler, register_backward_throttler
+        from muxtune.core.utils import MixedTensor, BackwardThrottler
         from muxtune.global_envs import PeftType, global_configs
 
         class DummyBackbone(torch.nn.Module):
@@ -51,7 +50,7 @@ class BasicFuncTest(unittest.TestCase):
         peft_module_group.add_peft_module(peft_module)
 
         bw_throttler = BackwardThrottler()
-        register_backward_throttler(backbone.output_layer, bw_throttler)
+        backbone.output_layer = bw_throttler.hook_to_nonbase_op(backbone.output_layer)
 
         task_names = ["task_0", "task_1", ]
         task_inputs = [
@@ -76,12 +75,12 @@ class BasicFuncTest(unittest.TestCase):
         global_configs.current_microbatch_index = 0    
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_0"
-        input_task_0 = OrderedDict({ 0: task_inputs[0] })
+        input_task_0 = MixedTensor({ 0: task_inputs[0] })
         peft_out_0 = backbone(input_task_0)
         print(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_1"
-        input_task_1 = OrderedDict({ 0: task_inputs[1] })
+        input_task_1 = MixedTensor({ 0: task_inputs[1] })
         peft_out_1 = backbone(input_task_1)
         print(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 
@@ -106,26 +105,19 @@ class BasicFuncTest(unittest.TestCase):
         single_a1 = peft_module.adapters["peft_module_0::task_1"].lora_A.weight.grad.clone()
         single_b1 = peft_module.adapters["peft_module_0::task_1"].lora_B.weight.grad.clone()
 
-        batched_in = OrderedDict({ 0: torch.cat(task_inputs, dim=0) })
+        batched_in = MixedTensor({ 0: torch.cat(task_inputs, dim=0) })
         batched_out = backbone(batched_in)
         print(f"Multi-task batched forward output: {batched_out}")
 
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
 
-        print(f"After zero_grad, task_0 adapter grad: LoRA A: " + 
-              f"{peft_module.adapters['peft_module_0::task_0'].lora_A.weight.grad} " + 
-              f"| LoRA B: {peft_module.adapters['peft_module_0::task_0'].lora_B.weight.grad}\n\n")
-        print(f"After zero_grad, task_1 adapter grad: LoRA A: " + 
-              f"{peft_module.adapters['peft_module_0::task_1'].lora_A.weight.grad} " + 
-              f" | LoRA B: {peft_module.adapters['peft_module_0::task_1'].lora_B.weight.grad}\n\n")
-
-        for (peft_module_index, out) in batched_out.items():
+        for (peft_group_index, out) in batched_out.items():
             peft_out_0, peft_out_1 = torch.split(out, microbatch_sizes, dim=0)
             loss_0 = torch.nn.functional.mse_loss(peft_out_0, task_labels[0])
             loss_1 = torch.nn.functional.mse_loss(peft_out_1, task_labels[1])
-            losses = OrderedDict({ 0: loss_0, 1: loss_1 })
-            bw_throttler.batched_backward(losses)
+            losses = MixedTensor({ 0: loss_0, 1: loss_1 })
+            bw_throttler.backward(losses, peft_group_index)
 
         print(f"Multi-task backward task_0 adapter grad: LoRA A: " + 
               f"{peft_module.adapters['peft_module_0::task_0'].lora_A.weight.grad} " + 
