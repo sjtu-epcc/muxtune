@@ -101,6 +101,11 @@ class BasicFuncTest(unittest.TestCase):
               f"{peft_module.adapters['peft_module_0::task_1'].lora_A.weight.grad} " + 
               f" | LoRA B: {peft_module.adapters['peft_module_0::task_1'].lora_B.weight.grad}\n\n")
 
+        single_a0 = peft_module.adapters["peft_module_0::task_0"].lora_A.weight.grad.clone()
+        single_b0 = peft_module.adapters["peft_module_0::task_0"].lora_B.weight.grad.clone()
+        single_a1 = peft_module.adapters["peft_module_0::task_1"].lora_A.weight.grad.clone()
+        single_b1 = peft_module.adapters["peft_module_0::task_1"].lora_B.weight.grad.clone()
+
         batched_in = OrderedDict({ 0: torch.cat(task_inputs, dim=0) })
         batched_out = backbone(batched_in)
         print(f"Multi-task batched forward output: {batched_out}")
@@ -128,6 +133,11 @@ class BasicFuncTest(unittest.TestCase):
         print(f"Multi-task backward task_1 adapter grad: LoRA A: " + 
               f"{peft_module.adapters['peft_module_0::task_1'].lora_A.weight.grad} " + 
               f" | LoRA B: {peft_module.adapters['peft_module_0::task_1'].lora_B.weight.grad}\n\n")
+        
+        self.assertTrue(torch.allclose(single_a0, peft_module.adapters["peft_module_0::task_0"].lora_A.weight.grad, rtol=1e-2, atol=1e-2), "task_0 lora_A: single vs batched")
+        self.assertTrue(torch.allclose(single_b0, peft_module.adapters["peft_module_0::task_0"].lora_B.weight.grad, rtol=1e-2, atol=1e-2), "task_0 lora_B: single vs batched")
+        self.assertTrue(torch.allclose(single_a1, peft_module.adapters["peft_module_0::task_1"].lora_A.weight.grad, rtol=1e-2, atol=1e-2), "task_1 lora_A: single vs batched")
+        self.assertTrue(torch.allclose(single_b1, peft_module.adapters["peft_module_0::task_1"].lora_B.weight.grad, rtol=1e-2, atol=1e-2), "task_1 lora_B: single vs batched")
 
 
 if __name__ == '__main__':
