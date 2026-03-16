@@ -17,7 +17,7 @@ __all__ = [
 ]
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def batched_base_op_forward(
     base_op: nn.Module, inputs: List[torch.Tensor], split_sizes: List[int], 
     prev_fw_func_name: str = "forward",
@@ -30,7 +30,7 @@ def batched_base_op_forward(
     return torch.split(batched_output, split_sizes, dim=0)
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def batched_base_op_backward(
     base_op: nn.Module, grad_outputs: List[torch.Tensor], split_sizes: List[int],
 ) -> List[torch.Tensor]:
@@ -41,7 +41,7 @@ def batched_base_op_backward(
     return torch.split(batched_grad_in, split_sizes, dim=0)
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def batched_adapter_forward(
     ctx, peft_type: PeftType, inputs: List[torch.Tensor], adapters: List[nn.Module], 
 ) -> List[torch.Tensor]:
@@ -53,7 +53,7 @@ def batched_adapter_forward(
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched forward.")
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def batched_adapter_backward(
     ctx, peft_type: PeftType, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
 ) -> List[torch.Tensor]:
@@ -65,7 +65,7 @@ def batched_adapter_backward(
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched backward.")
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def _batched_lora_forward(
     ctx, inputs: List[torch.Tensor], adapters: List[nn.Module],
 ) -> List[torch.Tensor]:
@@ -91,7 +91,7 @@ def _batched_lora_forward(
     return scaled_lora_outs
 
 
-# @torch.no_grad()
+@torch.no_grad()
 def _batched_lora_backward(
     ctx, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
@@ -103,22 +103,18 @@ def _batched_lora_backward(
     lora_a_grad_ins = triton_grouped_gemm(lora_b_grad_ins, [adapter.lora_A.weight.contiguous() for adapter in adapters])
     lora_a_grad_weights = triton_grouped_gemm([inp.T.contiguous() for inp in ctx.lora_a_ins], lora_b_grad_ins)
     # accumulate gradient buffers
-    
-    print(lora_a_grad_weights)
-    print(lora_b_grad_weights)
-    exit(0)
-    
-    
     for adapter, lora_a_grad_weight, lora_b_grad_weight in zip(adapters, lora_a_grad_weights, lora_b_grad_weights):
         if adapter.lora_A.weight.grad is None:
-            adapter.lora_A.weight.grad = lora_a_grad_weight.to(
+            lora_a_grad_weight_ = lora_a_grad_weight.T.contiguous()
+            lora_b_grad_weight_ = lora_b_grad_weight.T.contiguous()
+            adapter.lora_A.weight.grad = lora_a_grad_weight_.to(
                 device=adapter.lora_A.weight.device, dtype=adapter.lora_B.weight.dtype)
         else:
-            adapter.lora_A.weight.grad += lora_a_grad_weight
+            adapter.lora_A.weight.grad += lora_a_grad_weight_
         if adapter.lora_B.weight.grad is None:
-            adapter.lora_B.weight.grad = lora_b_grad_weight.to(
+            adapter.lora_B.weight.grad = lora_b_grad_weight_.to(
                 device=adapter.lora_B.weight.device, dtype=adapter.lora_B.weight.dtype)
         else:
-            adapter.lora_B.weight.grad += lora_b_grad_weight
+            adapter.lora_B.weight.grad += lora_b_grad_weight_
 
     return lora_a_grad_ins
