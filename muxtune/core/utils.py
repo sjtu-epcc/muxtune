@@ -5,22 +5,24 @@
 """ Utility functions. """
 
 import os
+from typing import Tuple, List
 import functools
 from collections import OrderedDict
 
 import torch
 from torch import nn
 
+from muxtune.global_envs import global_configs
+
 __all__ = [ "BackwardThrottler", "register_backward_throttler", "NonBaseOpModule", ]
 
 
 class BackwardThrottler(nn.Module):
     """ Backward throttler to cutoff loss computation and batched backward pass 
-    for multiple adapters. For each adapter, its loss is seperately computed, while 
-    the remaining backward pass is concurrently executed with other batched adapters.
+    for multiple tasks. For each task, its loss is seperately computed, while 
+    the remaining backward pass is concurrently executed with other batched tasks.
 
-    This module should be inserted before the final output layer of LLM backbone, called
-    at its post backward hook.
+    This module should be hooked to the final output layer of LLM backbone. 
     """
 
     def __init__(self):
@@ -28,7 +30,12 @@ class BackwardThrottler(nn.Module):
         self.last_output_tensors = {}       # microbatch index -> tensor
         self.detached_output_tensors = {}   # used for loss computation, detached from graph
 
-    def forward(self, x: torch.Tensor, microbatch_index: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
+        if forced_adapter_name:
+            return x    # single adapter for debug
+        
+        microbatch_index = global_configs.current_microbatch_index
         self.last_output_tensors[microbatch_index] = x
         # detach
         detached_output_tensor = x.detach()
@@ -38,39 +45,53 @@ class BackwardThrottler(nn.Module):
         self.detached_output_tensors[microbatch_index] = detached_output_tensor
         return detached_output_tensor
 
-    def batched_backward(self, microbatch_index: int) -> None:
+    def batched_backward(self, losses: OrderedDict[str, torch.tensor]) -> None:
+        """ Backward losses for batched tasks, concatenate input gradients, and continune 
+        backward pass in a batched manner.
+        
+        Args:
+            losses: Loss scalars for each batched task.
+        """
+
+        microbatch_index = global_configs.current_microbatch_index
         last_output_tensor = self.last_output_tensors[microbatch_index]
+        for (local_id, loss) in losses.items():
+            # the graph is cutoff before detached_output_tensor, so `retain_graph` might not
+            # cause too much memory footprint.
+            torch.autograd.backward(loss, grad_tensors=None, retain_graph=True)
+        
         detached_output_tensor = self.detached_output_tensors[microbatch_index]
         assert detached_output_tensor.grad is not None, \
             "No gradient accumulated to the detached output tensor in BackwardThrottler."
-        
+
         torch.autograd.backward(last_output_tensor, grad_tensors=detached_output_tensor.grad)
         del self.last_output_tensors[microbatch_index]
         del self.detached_output_tensors[microbatch_index]
 
 
 def register_backward_throttler(
-    module: nn.Module, attr_name: str = "backward_throttler", prev_fw_func_name: str = "prev_fw_func",
-) -> nn.Module:
+    module: nn.Module, backward_throttler: BackwardThrottler, attr_name: str = "backward_throttler", 
+    prev_fw_func_name: str = "prev_fw_func",
+) -> None:
     """ Register backward throttler to the module, called at its post backward hook. Normally, 
     the target module should be the last output layer of the model.
 
     Args:
         attr_name: The attribute name of the backward throttler (default: "backward_throttler").
+        prev_fw_func_name: The attribute name of the original forward function of the 
+            target module after hooked (default: "prev_fw_func").
     """
     assert not hasattr(module, attr_name), "Backward throttler has already been hooked."
-    bw_throttler = BackwardThrottler()
-    setattr(module, attr_name, bw_throttler)
+    setattr(module, attr_name, backward_throttler)
     setattr(module, prev_fw_func_name, module.forward)
 
-    def __hooked_forward(module, *args, **kwargs) -> OrderedDict:
-        bw_throttler = getattr(module, attr_name)
+    def __hooked_forward(module_, *args, **kwargs) -> OrderedDict:
+        bw_throttler = getattr(module_, attr_name)
         input_tensors = args[0]
-        module_op_func = getattr(module, prev_fw_func_name)
-        microbatch_index = kwargs.get("microbatch_index", -1)
+        module_op_func = getattr(module_, prev_fw_func_name)
         output_tensors = OrderedDict()
         for (peft_module_index, input_tensor) in input_tensors.items():
-            act = bw_throttler(input_tensor, microbatch_index)
+            act = bw_throttler(input_tensor)
             output_tensors[peft_module_index] = module_op_func(act)
         
         return output_tensors
@@ -88,13 +109,6 @@ def register_backward_throttler(
             functools.partial(__hooked_forward, module), 
             getattr(module, prev_fw_func_name),
         )
-
-    def __post_backward_hook(module, grad_input, grad_output) -> torch.Tensor:
-        print(grad_input)
-        print(grad_output)
-        exit(0)
-
-    _ = module.register_full_backward_hook(__post_backward_hook)
 
 
 class NonBaseOpModule:

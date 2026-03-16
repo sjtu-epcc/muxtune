@@ -87,7 +87,7 @@ class PeftModuleGroup:
             forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
             output_tensors = OrderedDict()
             for peft_module_name, peft_module in peft_module_group.peft_modules.items():
-                peft_module_index = peft_module_name.split("_")[-1]
+                peft_module_index = int(peft_module_name.split("_")[-1])
                 if forced_adapter_name is not None:
                     output_tensor = peft_module._single_forward(
                         forced_adapter_name, input_tensors[peft_module_index], prev_fw_func_name)
@@ -173,11 +173,17 @@ class PeftModule:
         """
         
         assert self.base_op is not None, "PeftModule is not hooked to a base operator."
-        return _BatchedPeftModuleForwardWrapper.apply(
+        batched_output = _BatchedPeftModuleForwardWrapper.apply(
             batched_peft_in, self.microbatch_sizes, self.config.peft_type, 
             self.base_op, [self.adapters[name] for name in self.ordered_adapter_names], 
             self.input_dispatcher, self.output_aggregator, prev_fw_func_name,
         )
+        # in PEFT, only adapter output has `requires_grad=True``. However, since we compute 
+        # adapter forward/backward within `torch.autograd.Function`, all activations are 
+        # default to `requires_grad=False`. Therefore, we need to explicitly specify the 
+        # Function output as `requires_grad=True` to enable backward propagation.
+        batched_output.requires_grad = True
+        return batched_output
     
     def register_base_op(self, base_op: nn.Module):
         """ Register the base operator for this module. """
@@ -194,8 +200,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         base_op: nn.Module, adapters: List["Adapter"], input_dispatcher: "InputDispatcher", 
         output_aggregator: "OutputAggregator", prev_fw_func_name: str = "forward",
     ) -> torch.Tensor:
-        """ Forward function for batched PeftModule. """
-
+        ctx.save_for_backward(batched_peft_in)
         ctx.split_sizes = split_sizes
         ctx.peft_type = peft_type
         ctx.base_op = base_op
@@ -233,15 +238,16 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     def backward(
         ctx, batched_grad_out: torch.Tensor,
     ) -> Tuple[torch.Tensor, None, None, None, None, None, None, None]:
-        """ Backward function for batched PeftModule. """
-        
+        batched_peft_in, = ctx.saved_tensors
         grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
-
         a_grad_outs, b_grad_outs = [], []
         for grad_out in grad_outs:
             a_grad_out, b_grad_out = ctx.output_aggregator.reversed_aggregate(grad_out)
             a_grad_outs.append(a_grad_out)
             b_grad_outs.append(b_grad_out)
+
+        print(a_grad_outs)
+        exit(0)
         
         b_grad_ins = batched_base_op_backward(ctx.base_op, grad_outputs=b_grad_outs, split_sizes=ctx.split_sizes)
         a_grad_ins = batched_adapter_backward(ctx, ctx.peft_type, ctx.adapters, grad_outputs=a_grad_outs)
