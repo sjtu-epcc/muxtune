@@ -31,6 +31,18 @@ class GlobalEnvConfigs:
     configurations. Thus, runtime modified configurations should be boardcasted among all ranks.
     """
 
+    #####################
+    # Model Parallelism #
+    #####################
+    tensor_model_parallel_size: int = 1
+    """ Intra-layer model parallelism. Splits tensors across GPU ranks. """
+
+    data_parallel_size: int = 1 
+    """ Data parallelism (Torch DDP). Perform gradient sync after backward. """
+
+    pipeline_model_parallel_size: int = 1
+    """ Inter-layer model parallelism. Splits transformer layers across GPU ranks. """
+
     ###########
     # Runtime #
     ###########
