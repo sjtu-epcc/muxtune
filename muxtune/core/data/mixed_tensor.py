@@ -35,3 +35,7 @@ class MixedTensor(OrderedDict):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+    
+    def _create_from_ordered_dict(self):
+        # Add here
+        raise NotImplementedError

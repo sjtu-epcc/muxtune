@@ -23,7 +23,7 @@ class BasicFuncTest(unittest.TestCase):
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
         from muxtune.core.modules.utils import BackwardThrottler, NonBaseOpModule
-        from muxtune.core.data.mixed_tensor import MixedTensor
+        from muxtune.core.data.mixed_tensor import MixedTensor, ChunkedTensor
         from muxtune.global_envs import PeftType, global_configs, logger
 
         class DummyBackbone(torch.nn.Module):
@@ -82,7 +82,9 @@ class BasicFuncTest(unittest.TestCase):
         global_configs.current_microbatch_index = 0    
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_0"
-        input_task_0 = MixedTensor({ 0: task_inputs[0] })
+        input_task_0 = MixedTensor(
+            { 0: task_inputs[0] }
+        )
         peft_out_0 = backbone(input_task_0)
         logger.info(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
