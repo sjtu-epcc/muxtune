@@ -15,7 +15,7 @@ from torch import nn
 
 from muxtune.core.modules.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
-from muxtune.core.modules.utils import MixedTensor
+from muxtune.core.data.mixed_tensor import MixedTensor
 from muxtune.global_envs import PeftType
 
 __all__ = [

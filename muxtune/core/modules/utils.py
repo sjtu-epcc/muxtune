@@ -12,16 +12,10 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from muxtune.core.data.mixed_tensor import MixedTensor
 from muxtune.global_envs import global_configs
 
-__all__ = [ "MixedTensor", "BackwardThrottler", "NonBaseOpModule" ]
-
-
-class MixedTensor(OrderedDict):
-    """ Mixed tensor class across spatial-temporal fused tasks. """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+__all__ = [ "BackwardThrottler", "NonBaseOpModule" ]
 
 
 class BackwardThrottler(nn.Module):
@@ -57,7 +51,7 @@ class BackwardThrottler(nn.Module):
         self.detached_output_tensors[microbatch_index][peft_group_index] = detached_output_tensor
         return detached_output_tensor
 
-    def backward(self, losses: MixedTensor[str, torch.tensor], peft_group_index: int) -> None:
+    def backward(self, losses: MixedTensor[int, torch.tensor], peft_group_index: int) -> None:
         """ Backward losses for batched tasks, concatenate input gradients, and continune 
         backward pass in a batched manner.
         

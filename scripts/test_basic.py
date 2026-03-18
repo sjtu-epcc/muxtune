@@ -22,7 +22,8 @@ class BasicFuncTest(unittest.TestCase):
 
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
-        from muxtune.core.modules.utils import MixedTensor, BackwardThrottler, NonBaseOpModule
+        from muxtune.core.modules.utils import BackwardThrottler, NonBaseOpModule
+        from muxtune.core.data.mixed_tensor import MixedTensor
         from muxtune.global_envs import PeftType, global_configs, logger
 
         class DummyBackbone(torch.nn.Module):
