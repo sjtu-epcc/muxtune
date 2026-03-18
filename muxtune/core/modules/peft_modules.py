@@ -13,9 +13,9 @@ from abc import ABC, abstractmethod
 import torch
 from torch import nn
 
-from muxtune.core.batched_ops import (
+from muxtune.core.modules.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
-from muxtune.core.utils import MixedTensor
+from muxtune.core.modules.utils import MixedTensor
 from muxtune.global_envs import PeftType
 
 __all__ = [

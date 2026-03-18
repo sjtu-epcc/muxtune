@@ -122,7 +122,7 @@ def get_train_data_iterator(
     vocab_size: int, global_batch_size, num_micro_batches, sequence_length: int, 
     random_seed: int = 1234, path_to_cache: str = None, num_iters: int = 10,
 ) -> Iterator:
-    """ Get training data iterator. """
+    """ Get training data iterator for a single task. """
 
     # Dataset split
     num_train_valid_test_samples = [

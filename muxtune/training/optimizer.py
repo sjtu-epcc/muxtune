@@ -14,10 +14,10 @@ from megatron.core.optimizer.grad_scaler import (
 
 from muxtune.global_envs import PeftType
 
-__all__ = [ "get_optimizer_and_scheduler", ]
+__all__ = [ "get_optimizers_and_schedulers", ]
 
 
-def get_optimizer_and_scheduler(
+def get_optimizers_and_schedulers(
     model: List[MegatronModule],
     global_batch_size: int,
     num_iters: int,
@@ -34,7 +34,7 @@ def get_optimizer_and_scheduler(
     num_lr_warmup_iters: int = 0,
     lr_decay_style: str = "cosine",
 ) -> Tuple[Dict[str, torch.optim.Optimizer], Dict[str, OptimizerParamScheduler]]:
-    """ Get optimizer and learning rate scheduler. """
+    """ Get optimizers and learning rate schedulers per PEFT task. """
 
     # Optimizers
     optimizers = {}

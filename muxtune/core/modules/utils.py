@@ -2,8 +2,6 @@
 # -*- coding:utf-8 -*-
 # Author: Chunyu Xue
 
-""" Utility functions. """
-
 import os
 from typing import Tuple, List, Dict
 import time

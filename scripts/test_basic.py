@@ -16,23 +16,25 @@ class BasicFuncTest(unittest.TestCase):
     This unit testcase should be executed with `torchrun`, i.e., `torchrun --nproc-per-node N script.py`.
     """
 
-    @unittest.skip("Pass.")
+    # @unittest.skip("Pass.")
     def test_correctness_of_spatial_temporal_task_colocation(self):
         import torch
 
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
-        from muxtune.core.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
-        from muxtune.core.utils import MixedTensor, BackwardThrottler
+        from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
+        from muxtune.core.modules.utils import MixedTensor, BackwardThrottler, NonBaseOpModule
         from muxtune.global_envs import PeftType, global_configs, logger
 
         class DummyBackbone(torch.nn.Module):
             def __init__(self):
                 super().__init__()
+                self.input_layer = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
                 self.base_op = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
                 self.output_layer = torch.nn.Linear(4, 4, device="cuda", dtype=torch.float16)
 
             def forward(self, x):
-                act = self.base_op(x)
+                act = self.input_layer(x)
+                act = self.base_op(act)
                 return self.output_layer(act)
 
         backbone = DummyBackbone()
@@ -48,6 +50,11 @@ class BasicFuncTest(unittest.TestCase):
         peft_module = PeftModule(config)
         peft_module_group.add_peft_module(peft_module)
 
+        # Non-base operator layers
+        nonbase_op_module = NonBaseOpModule()
+        backbone.input_layer = nonbase_op_module.hook_to_nonbase_op(backbone.input_layer)
+
+        # Last layer
         bw_throttler = BackwardThrottler()
         backbone.output_layer = bw_throttler.hook_to_nonbase_op(backbone.output_layer)
 
@@ -132,7 +139,7 @@ class BasicFuncTest(unittest.TestCase):
 
         logger.info("Passed correctness test for spatial-temporal multi-task cololocation.")
 
-    # @unittest.skip("Pass.")
+    @unittest.skip("Pass.")
     def test_peft_enabled_meagtron_gpt(self):
         """ Run the parallelized Megatron model with PEFT adapters hooked. """
 
@@ -150,7 +157,7 @@ class BasicFuncTest(unittest.TestCase):
         from muxtune.training.utils import initialize_distributed
         from muxtune.models.backbones.gpt import GPTModel
         from muxtune.training.trainer import Trainer
-        from muxtune.training.optimizer import get_optimizer_and_scheduler
+        from muxtune.training.optimizer import get_optimizers_and_schedulers
         from muxtune.training.utils import (setup_model, get_train_data_iterator, 
                                             get_input_batch, ModelType)
         from muxtune.global_envs import global_configs
@@ -163,7 +170,7 @@ class BasicFuncTest(unittest.TestCase):
             post_process = mpu.is_pipeline_last_stage()
             return GPTModel(megatron_config, vocab_size, max_seq_len, pre_process, post_process, device=device)
 
-        # TODO(chunyu): implement multi-task data loaders, chunk-level aligner, and correctness verification.
+        # TODO(chunyu): implement chunk-level aligner, and correctness verification.
 
         model_type = ModelType.GPT
         global_bs = 8
@@ -235,7 +242,7 @@ class BasicFuncTest(unittest.TestCase):
         train_data_iterator = get_train_data_iterator(
             vocab_size, global_bs, num_micro_batches, seq_len, num_iters=num_iters,
         )
-        (optimizers, opt_param_schedulers) = get_optimizer_and_scheduler(
+        (optimizers, opt_param_schedulers) = get_optimizers_and_schedulers(
             model, global_bs, num_iters, fp16=(dtype == torch.float16), params_dtype=dtype, 
         )
 

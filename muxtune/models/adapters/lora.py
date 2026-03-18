@@ -10,7 +10,7 @@ import math
 import torch
 from torch import nn
 
-from muxtune.core.peft_modules import Adapter, InputDispatcher, OutputAggregator
+from muxtune.core.modules.peft_modules import Adapter, InputDispatcher, OutputAggregator
 from muxtune.global_envs import PeftType
 
 __all__ = [ "LoraAdapter", "LoraInputDispatcher", "LoraOutputAggregator" ]
