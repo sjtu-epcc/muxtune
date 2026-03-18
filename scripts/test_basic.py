@@ -83,13 +83,17 @@ class BasicFuncTest(unittest.TestCase):
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_0"
         input_task_0 = MixedTensor(
-            { 0: task_inputs[0] }
+            tensor_dict={ 0: [task_inputs[0]] },
+            chunk_config={ 0: {'chunk_mask': [False] * 2, 'layout': 'b:h', }},
         )
         peft_out_0 = backbone(input_task_0)
         logger.info(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_1"
-        input_task_1 = MixedTensor({ 0: task_inputs[1] })
+        input_task_1 = MixedTensor(
+            tensor_dict={ 0: [task_inputs[1]] },
+            chunk_config={ 0: {'chunk_mask': [False] * 4, 'layout': 'b:h', }},
+        )
         peft_out_1 = backbone(input_task_1)
         logger.info(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 

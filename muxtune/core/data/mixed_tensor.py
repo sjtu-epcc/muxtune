@@ -2,18 +2,17 @@
 # -*- coding:utf-8 -*-
 # Author: Chunyu Xue
 
-from typing import List
+from typing import List, Dict, Optional, Any
 from collections import OrderedDict
 
 import torch
-from torch import nn
 
 __all__ = [ "ChunkedTensor", "MixedTensor" ]
 
 
 class ChunkedTensor:
     """ Chunked tensor class to shard partial sequences along sequence dimension. 
-    
+
     Args:
         value: The underlying tensor from the physical view.
         chunk_mask: List of booleans with the length of `b`. If a boolean is `True`, the 
@@ -29,13 +28,34 @@ class ChunkedTensor:
 
 class MixedTensor(OrderedDict):
     """ Mixed tensor class across spatial-temporal fused tasks.
-    
+
     The mapping is peft group index (`int`) -> a list of data chunks (`List[ChunkedTensor]`). 
+    
+    Args:
+        tensor_dict: Dict from peft group index to chunked tensors per group.
+        chunk_config: Dict from peft group index to {'chunk_mask': [False, False], 
+            'layout': 's:b:h'}).
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-    
-    def _create_from_ordered_dict(self):
-        # Add here
-        raise NotImplementedError
+    def __init__(
+        self,
+        tensor_dict: Optional[Dict[int, List[torch.Tensor]]] = None,
+        chunk_config: Optional[Dict[int, Dict[str, Any]]] = None,
+        *args,
+        **kwargs,
+    ):
+        if tensor_dict is not None:     # auto transform
+            chunk_config = chunk_config or {}
+            od = OrderedDict()
+            for peft_group_index, tensors in tensor_dict.items():
+                cfg = chunk_config.get(peft_group_index, {})
+                layout = cfg.get("layout", "s:b:h")
+                batch_dim = layout.split(":").index("b")
+                chunk_mask = cfg.get("chunk_mask", [False] * tensors[0].shape[batch_dim])
+                chunked_tensors = [
+                    ChunkedTensor(tensor, chunk_mask, layout) for tensor in tensors
+                ]
+                od[peft_group_index] = chunked_tensors
+            super().__init__(od, **kwargs)
+        else:
+            super().__init__(*args, **kwargs)
