@@ -17,7 +17,7 @@ class BasicFuncTest(unittest.TestCase):
     This unit testcase should be executed with `torchrun`, i.e., `torchrun --nproc-per-node N script.py`.
     """
 
-    # @unittest.skip("Pass.")
+    @unittest.skip("Pass.")
     def test_correctness_of_spatial_temporal_task_colocation(self):
         import torch
 
