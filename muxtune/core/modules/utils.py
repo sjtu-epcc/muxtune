@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from muxtune.core.data.mixed_tensor import ChunkedTensor, MixedTensor
+from muxtune.core.data.chunked_tensor import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs
 
 __all__ = [ "BackwardThrottler", "NonBaseOpModule" ]

@@ -23,8 +23,10 @@ class BasicFuncTest(unittest.TestCase):
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
         from muxtune.core.modules.utils import BackwardThrottler, NonBaseOpModule
-        from muxtune.core.data.mixed_tensor import MixedTensor, ChunkedTensor
+        from muxtune.core.data.chunked_tensor import MixedTensor, ChunkedTensor
         from muxtune.global_envs import PeftType, global_configs, logger
+
+        # TODO(chunyu): Fully disaggregate chunks of the same microbatch.
 
         class DummyBackbone(torch.nn.Module):
             def __init__(self):
