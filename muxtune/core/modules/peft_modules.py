@@ -213,7 +213,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         a_ins, b_ins = [], []
         peft_ins = [
             t.contiguous() for t in torch.split(batched_peft_in, split_sizes, dim=global_configs.batch_dimension)
-        ]   # split(..., dim=1) returns non-contiguous views; make contiguous once so downstream can use .view()
+        ]   # split(..., dim=1) returns non-contiguous views
         for peft_in in peft_ins:
             a_in, b_in = input_dispatcher.dispatch(peft_in)
             a_ins.append(a_in)
@@ -241,7 +241,9 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
     def backward(
         ctx, batched_grad_out: torch.Tensor,
     ) -> Tuple[torch.Tensor, None, None, None, None, None, None, None]:
-        grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=global_configs.batch_dimension)
+        grad_outs = [
+            t.contiguous() for t in torch.split(batched_grad_out, ctx.split_sizes, dim=global_configs.batch_dimension)
+        ]   # split(..., dim=1) returns non-contiguous views
         a_grad_outs, b_grad_outs = [], []
         for grad_out in grad_outs:
             a_grad_out, b_grad_out = ctx.output_aggregator.reversed_aggregate(grad_out)
