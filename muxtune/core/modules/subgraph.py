@@ -10,8 +10,7 @@ import enum
 import torch
 from torch import nn
 
-from muxtune.core.modules.peft_modules import PeftModule
-from muxtune.core.data.tensors import (ChunkedTensor, MixedTensor)
+from muxtune.core.data.tensors import ChunkedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
 __all__ = [ "SubGraphType", "SubGraph", ]
@@ -27,7 +26,8 @@ class SubGraphType(enum.Enum):
 
 class SubGraph:
     """ Sub-graph class that contains consecutive non-base computation 
-    operators, a single communication operator, or a peft module.
+    operators, a single communication operator, or a base computation 
+    operator hooked with a PeftModuleGroup.
 
     Each hybrid task has a dedicated `SubGraph` for the same operators.
     
@@ -49,7 +49,7 @@ class SubGraph:
         self._modules = []
         self._kwargs = kwargs   # e.g., process group for communication operator
     
-    def record(self, module: Union[nn.Module, PeftModule]):
+    def record(self, module: nn.Module):
         """ Record a single `nn.Module`. """
         self._modules.append(module)
 

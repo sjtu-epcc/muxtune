@@ -53,7 +53,80 @@ class PeftModuleGroup:
 
     def __init__(self, index: int = 0):
         self.base_op = None
-        self.peft_modules = {}  # peft module name -> peft module
+        self.peft_modules = {}  # hybrid task index -> peft module
+
+    def add_peft_module(self, peft_module: "PeftModule"):
+        assert self.base_op is not None, \
+            "Base operator should be hooked before adding PEFT modules."
+        assert peft_module.config.index not in self.peft_modules, \
+            f"Hybrid task index {peft_module.config.index} already exists in the group."
+        
+        peft_module.register_base_op(self.base_op)
+        self.peft_modules[peft_module.config.index] = peft_module
+
+    def hook_to_base_op(
+        self, base_op: nn.Module, attr_name: str = "peft_module_group", 
+        prev_fw_func_name: str = "prev_fw_func",
+    ) -> nn.Module:
+        """ Hook to the base operator. 
+        
+        Args:
+            base_op: The base operator module to be hooked.
+            attr_name: The attribute name of the PEFT module group (default: "peft_module_group").
+            prev_fw_func_name: The attribute name of the original forward function of the 
+                base operator, after the PeftModuleGroup is hooked (default: "prev_fw_func").
+        """
+        assert self.base_op is None, "PEFT module group has already been hooked."
+        setattr(base_op, attr_name, self)
+        setattr(base_op, prev_fw_func_name, base_op.forward)
+        self.base_op = base_op
+        
+        def __hooked_forward(module, *args, hybrid_task_index: int = None, **kwargs) -> ChunkedTensor:
+            peft_module_group = getattr(module, attr_name)
+            input_tensors = args[0]
+            
+            raise NotImplementedError
+            
+            forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
+            output_tensors = MixedTensor()
+            for hybrid_task_index, peft_module in peft_module_group.peft_modules.items():
+                chunked_input_tensors: List[ChunkedTensor] = input_tensors[hybrid_task_index]
+                chunked_output_tensors = []
+                for chunk in chunked_input_tensors:
+                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
+                    if forced_adapter_name is not None:
+                        output_tensor = peft_module._single_forward(
+                            forced_adapter_name, chunk.value, prev_fw_func_name)
+                    else:
+                        output_tensor = peft_module.batched_forward(
+                            chunk.value, prev_fw_func_name)
+                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
+                output_tensors[hybrid_task_index] = chunked_output_tensors
+
+            return output_tensors
+
+        # Overriding a GraphModuleImpl forward freezes the forward call and 
+        # later modifications on the graph will fail.
+        # Reference: https://pytorch.slack.com/archives/C3PDTEV8E/p1705929610405409
+        if "GraphModuleImpl" in str(type(base_op)):
+            base_op.__class__.forward = functools.update_wrapper(
+                functools.partial(__hooked_forward, base_op), 
+                getattr(base_op, prev_fw_func_name),
+            )
+        else:
+            base_op.forward = functools.update_wrapper(
+                functools.partial(__hooked_forward, base_op), 
+                getattr(base_op, prev_fw_func_name),
+            )
+        return base_op
+
+
+class PeftModuleGroupV1:
+    """ A group of PEFT modules on a single base operator. """
+
+    def __init__(self, index: int = 0):
+        self.base_op = None
+        self.peft_modules = {}  # hybrid task index -> peft module
 
     def add_peft_module(self, peft_module: "PeftModule"):
         assert self.base_op is not None, \
