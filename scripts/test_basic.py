@@ -44,8 +44,7 @@ class BasicFuncTest(unittest.TestCase):
                 param.grad = None   # Clear grad
 
         config = PeftModuleConfig(
-            PeftType.LoRA, "peft_module_0", LoraInputDispatcher(), LoraOutputAggregator(), "cuda", torch.float16,
-        )
+            PeftType.LoRA, 0, LoraInputDispatcher(), LoraOutputAggregator(), "cuda", torch.float16)
         peft_module_group = PeftModuleGroup()
         backbone.base_op = peft_module_group.hook_to_base_op(backbone.base_op)
         peft_module = PeftModule(config)

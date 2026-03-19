@@ -14,7 +14,8 @@ import torch
 from torch import nn
 
 from muxtune.core.modules.batched_ops import (
-    batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
+    batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, 
+    batched_adapter_backward)
 from muxtune.core.data.mixed_tensor import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs, PeftType
 
@@ -31,9 +32,8 @@ class PeftModuleConfig:
     peft_type: PeftType = None
     """ PEFT module type (e.g., LoRA). """
 
-    module_name: str = None
-    """ Unique identifier of the PeftModule, in the format of:
-    "[base_op_module_name]::[peft_module_name]" (e.g., "qkv_proj::peft_module_0"). """
+    index: int = 0
+    """ Index of the PeftModule in the group. """
 
     input_dispatcher: "InputDispatcher" = None
     """ Input dispatcher for the PEFT module. """
@@ -58,11 +58,11 @@ class PeftModuleGroup:
     def add_peft_module(self, peft_module: "PeftModule"):
         assert self.base_op is not None, \
             "Base operator should be hooked before adding PEFT modules."
-        assert peft_module.config.module_name not in self.peft_modules, \
-            f"PEFT module name {peft_module.config.module_name} already exists in the group."
+        assert peft_module.config.index not in self.peft_modules, \
+            f"PEFT module index {peft_module.config.index} already exists in the group."
         
         peft_module.register_base_op(self.base_op)
-        self.peft_modules[peft_module.config.module_name] = peft_module
+        self.peft_modules[peft_module.config.index] = peft_module
 
     def hook_to_base_op(
         self, base_op: nn.Module, attr_name: str = "peft_module_group", 
@@ -86,8 +86,7 @@ class PeftModuleGroup:
             input_tensors = args[0]
             forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
             output_tensors = MixedTensor()
-            for peft_module_name, peft_module in peft_module_group.peft_modules.items():
-                peft_group_index = int(peft_module_name.split("_")[-1])
+            for peft_group_index, peft_module in peft_module_group.peft_modules.items():
                 chunked_input_tensors: List[ChunkedTensor] = input_tensors[peft_group_index]
                 chunked_output_tensors = []
                 for chunk in chunked_input_tensors:
