@@ -119,11 +119,8 @@ class BasicFuncTest(unittest.TestCase):
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
 
-        print(batched_out)
-        exit(0)
-
         for (peft_group_index, out) in batched_out.items():
-            peft_out_0, peft_out_1 = torch.split(out, microbatch_sizes, dim=0)
+            peft_out_0, peft_out_1 = torch.split(out[0].value, microbatch_sizes, dim=1)
             loss_0 = torch.nn.functional.mse_loss(peft_out_0, task_labels[0])
             loss_1 = torch.nn.functional.mse_loss(peft_out_1, task_labels[1])
             losses = MixedTensor({ 0: loss_0, 1: loss_1 })

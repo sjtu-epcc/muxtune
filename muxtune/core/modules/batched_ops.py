@@ -48,41 +48,41 @@ def batched_adapter_forward(
     """ Batched forward for adapters of the same PEFT type. """
 
     input_shapes = []
+    flattened_inputs = []
     for inp in inputs:
         assert inp.dim() == 3   # [s, b, h]
         input_shapes.append(inp.shape)
-        inp = inp.view(inp.shape[0] * inp.shape[1], inp.shape[2])
+        flattened_inputs.append(inp.view(inp.shape[0] * inp.shape[1], inp.shape[2]))
 
     if peft_type == PeftType.LoRA:
-        outputs = _batched_lora_forward(ctx, inputs, adapters)
+        outputs = _batched_lora_forward(ctx, flattened_inputs, adapters)
     else:
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched forward.")
     
-    for i, out in enumerate(outputs):
-        out = out.view(input_shapes[i])
-    return outputs
+    return [out.view(input_shapes[i]) for i, out in enumerate(outputs)]
 
 
 @torch.no_grad()
 def batched_adapter_backward(
-    ctx, peft_type: PeftType, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
+    ctx, peft_type: PeftType, grad_outputs: List[torch.Tensor], adapters: List[nn.Module], 
 ) -> List[torch.Tensor]:
     """ Batched backward for adapters of the same PEFT type. """
 
     grad_output_shapes = []
+    flattened_grad_outputs = []
     for grad_out in grad_outputs:
         assert grad_out.dim() == 3
         grad_output_shapes.append(grad_out.shape)
-        grad_out = grad_out.view(grad_out.shape[0] * grad_out.shape[1], grad_out.shape[2])
+        flattened_grad_outputs.append(
+            grad_out.view(grad_out.shape[0] * grad_out.shape[1], grad_out.shape[2]))
 
     if peft_type == PeftType.LoRA:
-        grad_inputs = _batched_lora_backward(ctx, adapters, grad_outputs)
+        grad_inputs = _batched_lora_backward(ctx, flattened_grad_outputs, adapters)
     else:
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched backward.")
 
-    for i, grad_in in enumerate(grad_inputs):
-        grad_in = grad_in.view(grad_output_shapes[i])
-    return grad_inputs
+    return [grad_in.view(grad_output_shapes[i]) for i, grad_in in enumerate(grad_inputs)]
+
 
 @torch.no_grad()
 def _batched_lora_forward(
@@ -100,9 +100,11 @@ def _batched_lora_forward(
     # ]
     # inputs = [(input_ * mask) / keep_prob for input_, mask, keep_prob in zip(inputs, dropout_masks, dropout_keep_probs)]
     # FIXME(chunyu): Currently we skip dropout. 
-    lora_a_outs = triton_grouped_gemm(
-        [inp.contiguous() for inp in inputs], [adapter.lora_A.weight.T.contiguous() for adapter in adapters]
-    )
+    
+    print(inputs[0].shape)
+    print(adapters[0].lora_A.weight.T.contiguous())
+    
+    lora_a_outs = triton_grouped_gemm(inputs, [adapter.lora_A.weight.T.contiguous() for adapter in adapters])
     lora_b_outs = triton_grouped_gemm(lora_a_outs, [adapter.lora_B.weight.T.contiguous() for adapter in adapters])
     scaled_lora_outs = [lora_b_out * adapter.scaling for lora_b_out, adapter in zip(lora_b_outs, adapters)]
     # ctx.lora_dropout_masks = dropout_masks   # for backward pass
@@ -114,7 +116,7 @@ def _batched_lora_forward(
 
 @torch.no_grad()
 def _batched_lora_backward(
-    ctx, adapters: List[nn.Module], grad_outputs: List[torch.Tensor], 
+    ctx, grad_outputs: List[torch.Tensor], adapters: List[nn.Module], 
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """ Batched backward for LoRA adapters. """
 
