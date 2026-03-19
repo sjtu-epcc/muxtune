@@ -81,29 +81,16 @@ class PeftModuleGroup:
         setattr(base_op, prev_fw_func_name, base_op.forward)
         self.base_op = base_op
         
-        def __hooked_forward(module, *args, hybrid_task_index: int = None, **kwargs) -> ChunkedTensor:
+        def __hooked_forward(module, *args, hybrid_task_index: int, **kwargs) -> List[ChunkedTensor]:
             peft_module_group = getattr(module, attr_name)
-            input_tensors = args[0]
-            
-            raise NotImplementedError
-            
-            forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
-            output_tensors = MixedTensor()
-            for hybrid_task_index, peft_module in peft_module_group.peft_modules.items():
-                chunked_input_tensors: List[ChunkedTensor] = input_tensors[hybrid_task_index]
-                chunked_output_tensors = []
-                for chunk in chunked_input_tensors:
-                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
-                    if forced_adapter_name is not None:
-                        output_tensor = peft_module._single_forward(
-                            forced_adapter_name, chunk.value, prev_fw_func_name)
-                    else:
-                        output_tensor = peft_module.batched_forward(
-                            chunk.value, prev_fw_func_name)
-                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[hybrid_task_index] = chunked_output_tensors
-
-            return output_tensors
+            chunked_input_tensors: List[ChunkedTensor] = args[0]
+            peft_module = peft_module_group.peft_modules[hybrid_task_index]
+            chunked_output_tensors = []
+            for chunk in chunked_input_tensors:
+                chunk_mask, layout = chunk.chunk_mask, chunk.layout
+                output_tensor = peft_module.batched_forward(chunk.value, prev_fw_func_name)
+                chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
+            return chunked_output_tensors
 
         # Overriding a GraphModuleImpl forward freezes the forward call and 
         # later modifications on the graph will fail.
