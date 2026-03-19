@@ -47,10 +47,20 @@ def batched_adapter_forward(
 ) -> List[torch.Tensor]:
     """ Batched forward for adapters of the same PEFT type. """
 
+    input_shapes = []
+    for inp in inputs:
+        assert inp.dim() == 3   # [s, b, h]
+        input_shapes.append(inp.shape)
+        inp = inp.view(inp.shape[0] * inp.shape[1], inp.shape[2])
+
     if peft_type == PeftType.LoRA:
-        return _batched_lora_forward(ctx, inputs, adapters)
+        outputs = _batched_lora_forward(ctx, inputs, adapters)
     else:
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched forward.")
+    
+    for i, out in enumerate(outputs):
+        out = out.view(input_shapes[i])
+    return outputs
 
 
 @torch.no_grad()
@@ -59,11 +69,20 @@ def batched_adapter_backward(
 ) -> List[torch.Tensor]:
     """ Batched backward for adapters of the same PEFT type. """
 
+    grad_output_shapes = []
+    for grad_out in grad_outputs:
+        assert grad_out.dim() == 3
+        grad_output_shapes.append(grad_out.shape)
+        grad_out = grad_out.view(grad_out.shape[0] * grad_out.shape[1], grad_out.shape[2])
+
     if peft_type == PeftType.LoRA:
-        return _batched_lora_backward(ctx, adapters, grad_outputs)
+        grad_inputs = _batched_lora_backward(ctx, adapters, grad_outputs)
     else:
         raise NotImplementedError(f"Unsuported PEFT type {peft_type} for batched backward.")
 
+    for i, grad_in in enumerate(grad_inputs):
+        grad_in = grad_in.view(grad_output_shapes[i])
+    return grad_inputs
 
 @torch.no_grad()
 def _batched_lora_forward(
