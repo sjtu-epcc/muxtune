@@ -25,9 +25,9 @@ def batched_base_op_forward(
     """ Batched forward for base op with multi-adapter inputs. """
 
     base_op_func = getattr(base_op, prev_fw_func_name)
-    batched_input = torch.cat(inputs, dim=global_configs.batch_dimension)
+    batched_input = torch.cat(inputs, dim=global_configs.batch_dim)
     batched_output = base_op_func(batched_input)
-    return torch.split(batched_output, split_sizes, dim=global_configs.batch_dimension)
+    return torch.split(batched_output, split_sizes, dim=global_configs.batch_dim)
 
 
 @torch.no_grad()
@@ -36,9 +36,9 @@ def batched_base_op_backward(
 ) -> List[torch.Tensor]:
     """ Batched backward for base op with multi-adapter grad outputs. """
     
-    batched_grad_out = torch.cat(grad_outputs, dim=global_configs.batch_dimension)
+    batched_grad_out = torch.cat(grad_outputs, dim=global_configs.batch_dim)
     batched_grad_in = torch.matmul(batched_grad_out, base_op.weight.contiguous())
-    return torch.split(batched_grad_in, split_sizes, dim=global_configs.batch_dimension)
+    return torch.split(batched_grad_in, split_sizes, dim=global_configs.batch_dim)
 
 
 @torch.no_grad()

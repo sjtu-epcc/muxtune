@@ -3,7 +3,7 @@
 # Author: Chunyu Xue
 
 import enum
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass, field
 import logging
 import time
@@ -11,7 +11,7 @@ import time
 import torch
 
 __all__ = [
-    "logger", "PeftType", "global_configs",
+    "logger", "PeftType", "global_configs", "StreamManager", "stream_manager",
     "TimeRecord", "Timer", "global_timer",
 ]
 
@@ -66,12 +66,55 @@ class GlobalEnvConfigs:
     current_microbatch_index: int = -1
     """ Current microbatch index on this rank. """
 
-    batch_dimension: int = 1
+    batch_dim: int = 1
     """ Batch dimension of intermediate tensors (1 for Megatron default). """
+
+    seq_dim: int = 0
+    """ Sequence dimension of intermediate tensors (0 for Megatron default). """
 
 
 global_configs = GlobalEnvConfigs()
 """ Object of global configurations. """
+
+
+class StreamManager:
+    """ CUDA stream manager. """
+
+    def __init__(self, device: Optional[torch.device] = None):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available. StreamManager requires CUDA.")
+
+        self.device = device or torch.device('cuda')
+        self._compute_stream = torch.cuda.current_stream()  # default stream
+        self._communicate_stream = torch.cuda.Stream(device=self.device)
+        self._events = {}
+    
+    def get_compute_stream(self) -> torch.cuda.Stream:
+        return self._compute_stream
+
+    def get_communicate_stream(self) -> torch.cuda.Stream:
+        return self._communicate_stream
+    
+    def record_wait_event(self, event_name: str, stream: torch.cuda.Stream):
+        """ Create and record a CUDA event in a stream, to be synchronized by 
+        another stream. """
+        assert event_name not in self._events, \
+            f"Event {event_name} has been recorded yet not released."
+        event = torch.cuda.Event()
+        with torch.cuda.stream(stream):
+            event.record(stream)
+        self._events[event_name] = event
+
+    def sync_wait_event(self, event_name: str, stream: torch.cuda.Stream):
+        """ Synchronize to a recorded CUDA event and release it. """
+        assert event_name in self._events, f"Event {event_name} has not been recorded."
+        with torch.cuda.stream(stream):
+            stream.wait_event(self._events[event_name])
+        del self._events[event_name]
+
+
+stream_manager = StreamManager()
+""" Global CUDA stream manager. """
 
 
 @dataclass
