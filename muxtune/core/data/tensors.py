@@ -27,7 +27,7 @@ class ChunkedTensor:
 
 
 class MixedTensor(OrderedDict):
-    """ Mixed tensor class across spatial-temporal fused tasks.
+    """ Mixed tensor class across spatial-temporal (intra-stage) fused tasks.
 
     The mapping is peft group index (`int`) -> a list of data chunks (`List[ChunkedTensor]`) 
     or a `torch.Tensor`. When using `MixedTensor({ key: value })` with `chunk_tensors` as None,
@@ -49,12 +49,12 @@ class MixedTensor(OrderedDict):
         if chunked_tensors is not None:     # auto transform
             chunk_config = chunk_config or {}
             od = OrderedDict()
-            for peft_group_index, tensors in chunked_tensors.items():
-                cfg = chunk_config.get(peft_group_index, {})
+            for hybrid_task_index, tensors in chunked_tensors.items():
+                cfg = chunk_config.get(hybrid_task_index, {})
                 layout = cfg.get("layout", "s:b:h")
                 batch_dim = layout.split(":").index("b")
                 chunk_mask = cfg.get("chunk_mask", [False] * tensors[0].shape[batch_dim])
-                od[peft_group_index] = [
+                od[hybrid_task_index] = [
                     ChunkedTensor(tensor, chunk_mask, layout) for tensor in tensors
                 ]
             super().__init__(od, **kwargs)

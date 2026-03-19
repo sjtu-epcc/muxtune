@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from muxtune.core.data.chunked_tensor import ChunkedTensor, MixedTensor
+from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs
 
 __all__ = [ "BackwardThrottler", "NonBaseOpModule" ]
@@ -28,11 +28,11 @@ class BackwardThrottler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.last_output_tensors = {}     # microbatch index -> peft_group_index -> tensor
+        self.last_output_tensors = {}     # microbatch index -> hybrid_task_index -> tensor
         self.detached_output_tensors = {}   # used for loss computation, detached from graph
         self.nonbase_op = None
 
-    def forward(self, x: torch.Tensor, peft_group_index: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, hybrid_task_index: int) -> torch.Tensor:
         forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
         if forced_adapter_name:
             return x    # single adapter for debug
@@ -40,7 +40,7 @@ class BackwardThrottler(nn.Module):
         microbatch_index = global_configs.current_microbatch_index
         if microbatch_index not in self.last_output_tensors:
             self.last_output_tensors[microbatch_index] = {}
-        self.last_output_tensors[microbatch_index][peft_group_index] = x
+        self.last_output_tensors[microbatch_index][hybrid_task_index] = x
         # detach
         detached_output_tensor = x.detach()
         detached_output_tensor.requires_grad = True
@@ -48,32 +48,32 @@ class BackwardThrottler(nn.Module):
         detached_output_tensor.grad = None
         if microbatch_index not in self.detached_output_tensors:
             self.detached_output_tensors[microbatch_index] = {}
-        self.detached_output_tensors[microbatch_index][peft_group_index] = detached_output_tensor
+        self.detached_output_tensors[microbatch_index][hybrid_task_index] = detached_output_tensor
         return detached_output_tensor
 
-    def backward(self, losses: MixedTensor[int, torch.tensor], peft_group_index: int) -> None:
+    def backward(self, losses: MixedTensor[int, torch.tensor], hybrid_task_index: int) -> None:
         """ Backward losses for batched tasks, concatenate input gradients, and continune 
         backward pass in a batched manner.
         
         Args:
             losses: Loss scalars for each batched task.
-            peft_group_index: Index of the hybrid task.
+            hybrid_task_index: The global index of the hybrid task.
         """
 
         microbatch_index = global_configs.current_microbatch_index
-        last_output_tensor = self.last_output_tensors[microbatch_index][peft_group_index]
+        last_output_tensor = self.last_output_tensors[microbatch_index][hybrid_task_index]
         for (_, loss) in losses.items():
             # the graph is cutoff before detached_output_tensor, so `retain_graph` might not
             # cause too much memory footprint.
             torch.autograd.backward(loss, grad_tensors=None, retain_graph=True)
         
-        detached_output_tensor = self.detached_output_tensors[microbatch_index][peft_group_index]
+        detached_output_tensor = self.detached_output_tensors[microbatch_index][hybrid_task_index]
         assert detached_output_tensor.grad is not None, \
             "No gradient accumulated to the detached output tensor in BackwardThrottler."
 
         torch.autograd.backward(last_output_tensor, grad_tensors=detached_output_tensor.grad)
-        del self.last_output_tensors[microbatch_index][peft_group_index]
-        del self.detached_output_tensors[microbatch_index][peft_group_index]
+        del self.last_output_tensors[microbatch_index][hybrid_task_index]
+        del self.detached_output_tensors[microbatch_index][hybrid_task_index]
 
     def hook_to_nonbase_op(self, nonbase_op: nn.Module, attr_name: str = "backward_throttler", 
         prev_fw_func_name: str = "prev_fw_func",
@@ -96,14 +96,14 @@ class BackwardThrottler(nn.Module):
             input_tensors = args[0]
             module_op_func = getattr(module, prev_fw_func_name)
             output_tensors = MixedTensor()
-            for (peft_group_index, chunked_input_tensors) in input_tensors.items():
+            for (hybrid_task_index, chunked_input_tensors) in input_tensors.items():
                 chunked_output_tensors = []
                 for chunk in chunked_input_tensors:
                     chunk_mask, layout = chunk.chunk_mask, chunk.layout
-                    output_tensor = bw_throttler(chunk.value, peft_group_index)
+                    output_tensor = bw_throttler(chunk.value, hybrid_task_index)
                     output_tensor = module_op_func(output_tensor)
                     chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[peft_group_index] = chunked_output_tensors
+                output_tensors[hybrid_task_index] = chunked_output_tensors
             
             return output_tensors
 
@@ -124,7 +124,7 @@ class BackwardThrottler(nn.Module):
 
 
 class NonBaseOpModule:
-    """ Non-base operator module to enable spatial-temporal execution of colocated PEFT tasks.
+    """ Non-base operator module to enable spatial-temporal (intra-stage) execution of PEFT tasks.
     
     This module should be hooked to every non-baseop nn.Module in the model, taking an 
     `MixedTensor` object as the input, and sequentially executing each batched tensor.
@@ -155,13 +155,13 @@ class NonBaseOpModule:
             input_tensors = args[0]
             nonbase_op_func = getattr(module, prev_fw_func_name)
             output_tensors = MixedTensor()
-            for (peft_group_index, chunked_input_tensors) in input_tensors.items():
+            for (hybrid_task_index, chunked_input_tensors) in input_tensors.items():
                 chunked_output_tensors = []
                 for chunk in chunked_input_tensors:
                     chunk_mask, layout = chunk.chunk_mask, chunk.layout
                     output_tensor = nonbase_op_func(chunk.value)
                     chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[peft_group_index] = chunked_output_tensors
+                output_tensors[hybrid_task_index] = chunked_output_tensors
             
             return output_tensors
         

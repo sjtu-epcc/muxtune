@@ -16,7 +16,7 @@ from torch import nn
 from muxtune.core.modules.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, 
     batched_adapter_backward)
-from muxtune.core.data.chunked_tensor import ChunkedTensor, MixedTensor
+from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs, PeftType
 
 __all__ = [
@@ -51,7 +51,7 @@ class PeftModuleConfig:
 class PeftModuleGroup:
     """ A group of PEFT modules on a single base operator. """
 
-    def __init__(self):
+    def __init__(self, index: int = 0):
         self.base_op = None
         self.peft_modules = {}  # peft module name -> peft module
 
@@ -59,7 +59,7 @@ class PeftModuleGroup:
         assert self.base_op is not None, \
             "Base operator should be hooked before adding PEFT modules."
         assert peft_module.config.index not in self.peft_modules, \
-            f"PEFT module index {peft_module.config.index} already exists in the group."
+            f"Hybrid task index {peft_module.config.index} already exists in the group."
         
         peft_module.register_base_op(self.base_op)
         self.peft_modules[peft_module.config.index] = peft_module
@@ -86,8 +86,8 @@ class PeftModuleGroup:
             input_tensors = args[0]
             forced_adapter_name = os.environ.get("FORCED_ADAPTER_NAME_DEBUG", None)
             output_tensors = MixedTensor()
-            for peft_group_index, peft_module in peft_module_group.peft_modules.items():
-                chunked_input_tensors: List[ChunkedTensor] = input_tensors[peft_group_index]
+            for hybrid_task_index, peft_module in peft_module_group.peft_modules.items():
+                chunked_input_tensors: List[ChunkedTensor] = input_tensors[hybrid_task_index]
                 chunked_output_tensors = []
                 for chunk in chunked_input_tensors:
                     chunk_mask, layout = chunk.chunk_mask, chunk.layout
@@ -98,7 +98,7 @@ class PeftModuleGroup:
                         output_tensor = peft_module.batched_forward(
                             chunk.value, prev_fw_func_name)
                     chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[peft_group_index] = chunked_output_tensors
+                output_tensors[hybrid_task_index] = chunked_output_tensors
 
             return output_tensors
 

@@ -23,10 +23,8 @@ class BasicFuncTest(unittest.TestCase):
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
         from muxtune.core.modules.utils import BackwardThrottler, NonBaseOpModule
-        from muxtune.core.data.chunked_tensor import MixedTensor, ChunkedTensor
+        from muxtune.core.data.tensors import MixedTensor, ChunkedTensor
         from muxtune.global_envs import PeftType, global_configs, logger
-
-        # TODO(chunyu): Fully disaggregate chunks of the same microbatch.
 
         class DummyBackbone(torch.nn.Module):
             def __init__(self):
@@ -120,12 +118,12 @@ class BasicFuncTest(unittest.TestCase):
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
 
-        for (peft_group_index, out) in batched_out.items():
+        for (hybrid_task_index, out) in batched_out.items():
             peft_out_0, peft_out_1 = torch.split(out[0].value, microbatch_sizes, dim=1)
             loss_0 = torch.nn.functional.mse_loss(peft_out_0, task_labels[0])
             loss_1 = torch.nn.functional.mse_loss(peft_out_1, task_labels[1])
             losses = MixedTensor({ 0: loss_0, 1: loss_1 })
-            bw_throttler.backward(losses, peft_group_index)
+            bw_throttler.backward(losses, hybrid_task_index)
 
         logger.info(f"Multi-task backward task_0 adapter grad: LoRA A: " + 
               f"{peft_module.adapters['peft_module_0::task_0'].lora_A.weight.grad} " + 
