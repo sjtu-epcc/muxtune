@@ -94,6 +94,13 @@ class SubGraph:
     def forward(self, chunked_input_tensors: List[ChunkedTensor]) -> List[ChunkedTensor]:
         chunked_output_tensors = []
         if self.type == SubGraphType.NON_PEFT_COMPUTE:
+            if self.prev.type == SubGraphType.COMMUNICATE:
+                # wait for communication complete
+                compute_stream = stream_manager.get_compute_stream()
+                prev_subgraph_index = self.prev.subgraph_index
+                event_name = f"subgraph_{prev_subgraph_index}::hybrid_task_{self.hybrid_task_index}"
+                stream_manager.sync_wait_event(event_name, compute_stream)
+
             for chunk in chunked_input_tensors:
                 tensor, chunk_mask, layout = chunk.value, chunk.chunk_mask, chunk.layout
                 for module in self._modules:
@@ -113,10 +120,8 @@ class SubGraph:
             
             with torch.cuda.stream(comm_stream):
                 self._modules[0](merged_tensor, **self._kwargs)
-            stream_manager.record_wait_event(
-                event_name=f"subgraph_{self.subgraph_index}::hybrid_task_{self.hybrid_task_index}",
-                stream=comm_stream,
-            )
+            event_name = f"subgraph_{self.subgraph_index}::hybrid_task_{self.hybrid_task_index}"
+            stream_manager.record_wait_event(event_name, comm_stream)
             
             tensors = [
                 t.contiguous() for t in torch.split(merged_tensor, chunk_sizes, dim=seq_dim)
