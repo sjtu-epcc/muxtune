@@ -29,33 +29,34 @@ class ChunkedTensor:
 class MixedTensor(OrderedDict):
     """ Mixed tensor class across spatial-temporal fused tasks.
 
-    The mapping is peft group index (`int`) -> a list of data chunks (`List[ChunkedTensor]`). 
+    The mapping is peft group index (`int`) -> a list of data chunks (`List[ChunkedTensor]`) 
+    or a `torch.Tensor`. When using `MixedTensor({ key: value })` with `chunk_tensors` as None,
+    it falls back to standard `OrderedDict` from `int` to `torch.Tensor`.
     
     Args:
-        tensor_dict: Dict from peft group index to chunked tensors per group.
+        chunked_tensors: Dict from peft group index to chunked tensors per group.
         chunk_config: Dict from peft group index to {'chunk_mask': [False, False], 
             'layout': 's:b:h'}).
     """
 
     def __init__(
         self,
-        tensor_dict: Optional[Dict[int, List[torch.Tensor]]] = None,
-        chunk_config: Optional[Dict[int, Dict[str, Any]]] = None,
         *args,
+        chunked_tensors: Optional[Dict[int, List[torch.Tensor]]] = None,
+        chunk_config: Optional[Dict[int, Dict[str, Any]]] = None,
         **kwargs,
     ):
-        if tensor_dict is not None:     # auto transform
+        if chunked_tensors is not None:     # auto transform
             chunk_config = chunk_config or {}
             od = OrderedDict()
-            for peft_group_index, tensors in tensor_dict.items():
+            for peft_group_index, tensors in chunked_tensors.items():
                 cfg = chunk_config.get(peft_group_index, {})
                 layout = cfg.get("layout", "s:b:h")
                 batch_dim = layout.split(":").index("b")
                 chunk_mask = cfg.get("chunk_mask", [False] * tensors[0].shape[batch_dim])
-                chunked_tensors = [
+                od[peft_group_index] = [
                     ChunkedTensor(tensor, chunk_mask, layout) for tensor in tensors
                 ]
-                od[peft_group_index] = chunked_tensors
             super().__init__(od, **kwargs)
         else:
             super().__init__(*args, **kwargs)

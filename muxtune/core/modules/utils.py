@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from muxtune.core.data.mixed_tensor import MixedTensor
+from muxtune.core.data.mixed_tensor import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs
 
 __all__ = [ "BackwardThrottler", "NonBaseOpModule" ]
@@ -96,9 +96,14 @@ class BackwardThrottler(nn.Module):
             input_tensors = args[0]
             module_op_func = getattr(module, prev_fw_func_name)
             output_tensors = MixedTensor()
-            for (peft_group_index, input_tensor) in input_tensors.items():
-                act = bw_throttler(input_tensor, peft_group_index)
-                output_tensors[peft_group_index] = module_op_func(act)
+            for (peft_group_index, chunked_input_tensors) in input_tensors.items():
+                chunked_output_tensors = []
+                for chunk in chunked_input_tensors:
+                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
+                    output_tensor = bw_throttler(chunk.value, peft_group_index)
+                    output_tensor = module_op_func(output_tensor)
+                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
+                output_tensors[peft_group_index] = chunked_output_tensors
             
             return output_tensors
 
@@ -150,8 +155,13 @@ class NonBaseOpModule:
             input_tensors = args[0]
             nonbase_op_func = getattr(module, prev_fw_func_name)
             output_tensors = MixedTensor()
-            for (peft_group_index, input_tensor) in input_tensors.items():
-                output_tensors[peft_group_index] = nonbase_op_func(input_tensor)
+            for (peft_group_index, chunked_input_tensors) in input_tensors.items():
+                chunked_output_tensors = []
+                for chunk in chunked_input_tensors:
+                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
+                    output_tensor = nonbase_op_func(chunk.value)
+                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
+                output_tensors[peft_group_index] = chunked_output_tensors
             
             return output_tensors
         

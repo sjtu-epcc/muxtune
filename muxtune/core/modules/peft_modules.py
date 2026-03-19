@@ -15,8 +15,8 @@ from torch import nn
 
 from muxtune.core.modules.batched_ops import (
     batched_base_op_forward, batched_base_op_backward, batched_adapter_forward, batched_adapter_backward)
-from muxtune.core.data.mixed_tensor import MixedTensor
-from muxtune.global_envs import PeftType
+from muxtune.core.data.mixed_tensor import ChunkedTensor, MixedTensor
+from muxtune.global_envs import global_configs, PeftType
 
 __all__ = [
     "PeftModuleConfig", "PeftModuleGroup", "PeftModule", 
@@ -88,13 +88,18 @@ class PeftModuleGroup:
             output_tensors = MixedTensor()
             for peft_module_name, peft_module in peft_module_group.peft_modules.items():
                 peft_group_index = int(peft_module_name.split("_")[-1])
-                if forced_adapter_name is not None:
-                    output_tensor = peft_module._single_forward(
-                        forced_adapter_name, input_tensors[peft_group_index], prev_fw_func_name)
-                else:
-                    output_tensor = peft_module.batched_forward(
-                        input_tensors[peft_group_index], prev_fw_func_name)
-                output_tensors[peft_group_index] = output_tensor
+                chunked_input_tensors: List[ChunkedTensor] = input_tensors[peft_group_index]
+                chunked_output_tensors = []
+                for chunk in chunked_input_tensors:
+                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
+                    if forced_adapter_name is not None:
+                        output_tensor = peft_module._single_forward(
+                            forced_adapter_name, chunk.value, prev_fw_func_name)
+                    else:
+                        output_tensor = peft_module.batched_forward(
+                            chunk.value, prev_fw_func_name)
+                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
+                output_tensors[peft_group_index] = chunked_output_tensors
 
             return output_tensors
 
@@ -206,7 +211,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         ctx.prev_fw_func_name = prev_fw_func_name
         
         a_ins, b_ins = [], []
-        peft_ins = torch.split(batched_peft_in, split_sizes, dim=0)
+        peft_ins = torch.split(batched_peft_in, split_sizes, dim=global_configs.batch_dimension)
         for peft_in in peft_ins:
             a_in, b_in = input_dispatcher.dispatch(peft_in)
             a_ins.append(a_in)
@@ -228,13 +233,13 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
         ctx.a_ins = a_ins   # for backward pass
         ctx.a_outs = a_outs
 
-        return torch.cat(outs, dim=0)
+        return torch.cat(outs, dim=global_configs.batch_dimension)
 
     @staticmethod
     def backward(
         ctx, batched_grad_out: torch.Tensor,
     ) -> Tuple[torch.Tensor, None, None, None, None, None, None, None]:
-        grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=0)
+        grad_outs = torch.split(batched_grad_out, ctx.split_sizes, dim=global_configs.batch_dimension)
         a_grad_outs, b_grad_outs = [], []
         for grad_out in grad_outs:
             a_grad_out, b_grad_out = ctx.output_aggregator.reversed_aggregate(grad_out)
@@ -249,7 +254,7 @@ class _BatchedPeftModuleForwardWrapper(torch.autograd.Function):
             grad_in = ctx.input_dispatcher.reversed_dispatch(a_grad_in, b_grad_in)
             grad_ins.append(grad_in)
 
-        return torch.cat(grad_ins, dim=0), None, None, None, None, None, None, None
+        return torch.cat(grad_ins, dim=global_configs.batch_dimension), None, None, None, None, None, None, None
 
 
 class Adapter(nn.Module, ABC):

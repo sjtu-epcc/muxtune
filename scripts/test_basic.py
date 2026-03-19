@@ -61,12 +61,12 @@ class BasicFuncTest(unittest.TestCase):
 
         task_names = ["task_0", "task_1", ]
         task_inputs = [
-            torch.randn(2, 4, device="cuda", dtype=torch.float16),
-            torch.randn(4, 4, device="cuda", dtype=torch.float16),
+            torch.randn((2, 2, 4), device="cuda", dtype=torch.float16), # [s, b, h]
+            torch.randn((2, 4, 4), device="cuda", dtype=torch.float16),
         ]
         task_labels = [
-            torch.randn(2, 4, device="cuda", dtype=torch.float16),
-            torch.randn(4, 4, device="cuda", dtype=torch.float16),
+            torch.randn((2, 2, 4), device="cuda", dtype=torch.float16),
+            torch.randn((2, 4, 4), device="cuda", dtype=torch.float16),
         ]
         microbatch_sizes = [2, 4]
         for i, task_name in enumerate(task_names):
@@ -74,7 +74,7 @@ class BasicFuncTest(unittest.TestCase):
                 f"peft_module_0::{task_name}", peft_module.config.device, peft_module.config.dtype, 
                 lora_r=2, lora_alpha=4, in_features=4, out_features=4,
             )
-            peft_module.register_one_adapter(adapter, task_inputs[i].shape[0])
+            peft_module.register_one_adapter(adapter, task_inputs[i].shape[1])
 
         optimizer_0 = torch.optim.Adam(peft_module.adapters["peft_module_0::task_0"].parameters(), lr=1e-3)
         optimizer_1 = torch.optim.Adam(peft_module.adapters["peft_module_0::task_1"].parameters(), lr=1e-3)
@@ -82,18 +82,12 @@ class BasicFuncTest(unittest.TestCase):
         global_configs.current_microbatch_index = 0    
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_0"
-        input_task_0 = MixedTensor(
-            tensor_dict={ 0: [task_inputs[0]] },
-            chunk_config={ 0: {'chunk_mask': [False] * 2, 'layout': 'b:h', }},
-        )
+        input_task_0 = MixedTensor(chunked_tensors={ 0: [task_inputs[0]] })
         peft_out_0 = backbone(input_task_0)
         logger.info(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_1"
-        input_task_1 = MixedTensor(
-            tensor_dict={ 0: [task_inputs[1]] },
-            chunk_config={ 0: {'chunk_mask': [False] * 4, 'layout': 'b:h', }},
-        )
+        input_task_1 = MixedTensor(chunked_tensors={ 0: [task_inputs[1]] })
         peft_out_1 = backbone(input_task_1)
         logger.info(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 
@@ -101,8 +95,8 @@ class BasicFuncTest(unittest.TestCase):
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
 
-        loss_0 = torch.nn.functional.mse_loss(peft_out_0[0], task_labels[0])
-        loss_1 = torch.nn.functional.mse_loss(peft_out_1[0], task_labels[1])
+        loss_0 = torch.nn.functional.mse_loss(peft_out_0[0][0].value, task_labels[0])
+        loss_1 = torch.nn.functional.mse_loss(peft_out_1[0][0].value, task_labels[1])
         loss_0.backward()
         loss_1.backward()
 
@@ -118,12 +112,15 @@ class BasicFuncTest(unittest.TestCase):
         single_a1 = peft_module.adapters["peft_module_0::task_1"].lora_A.weight.grad.clone()
         single_b1 = peft_module.adapters["peft_module_0::task_1"].lora_B.weight.grad.clone()
 
-        batched_in = MixedTensor({ 0: torch.cat(task_inputs, dim=0) })
+        batched_in = MixedTensor(chunked_tensors={ 0: [torch.cat(task_inputs, dim=1)] })
         batched_out = backbone(batched_in)
         logger.info(f"Multi-task batched forward output: {batched_out}")
 
         optimizer_0.zero_grad()
         optimizer_1.zero_grad()
+
+        print(batched_out)
+        exit(0)
 
         for (peft_group_index, out) in batched_out.items():
             peft_out_0, peft_out_1 = torch.split(out, microbatch_sizes, dim=0)

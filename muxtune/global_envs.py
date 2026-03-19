@@ -66,6 +66,9 @@ class GlobalEnvConfigs:
     current_microbatch_index: int = -1
     """ Current microbatch index on this rank. """
 
+    batch_dimension: int = 1
+    """ Batch dimension of intermediate tensors (1 for Megatron default). """
+
 
 global_configs = GlobalEnvConfigs()
 """ Object of global configurations. """

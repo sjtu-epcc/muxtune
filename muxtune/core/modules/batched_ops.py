@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from muxtune.triton.grouped_gemm import triton_grouped_gemm
-from muxtune.global_envs import PeftType
+from muxtune.global_envs import global_configs, PeftType
 
 __all__ = [
     "batched_base_op_forward", "batched_base_op_backward", 
@@ -25,9 +25,9 @@ def batched_base_op_forward(
     """ Batched forward for base op with multi-adapter inputs. """
 
     base_op_func = getattr(base_op, prev_fw_func_name)
-    batched_input = torch.cat(inputs, dim=0)
+    batched_input = torch.cat(inputs, dim=global_configs.batch_dimension)
     batched_output = base_op_func(batched_input)
-    return torch.split(batched_output, split_sizes, dim=0)
+    return torch.split(batched_output, split_sizes, dim=global_configs.batch_dimension)
 
 
 @torch.no_grad()
@@ -36,9 +36,9 @@ def batched_base_op_backward(
 ) -> List[torch.Tensor]:
     """ Batched backward for base op with multi-adapter grad outputs. """
     
-    batched_grad_out = torch.cat(grad_outputs, dim=0)
+    batched_grad_out = torch.cat(grad_outputs, dim=global_configs.batch_dimension)
     batched_grad_in = torch.matmul(batched_grad_out, base_op.weight.contiguous())
-    return torch.split(batched_grad_in, split_sizes, dim=0)
+    return torch.split(batched_grad_in, split_sizes, dim=global_configs.batch_dimension)
 
 
 @torch.no_grad()
@@ -80,8 +80,10 @@ def _batched_lora_forward(
     #         for input_, keep_prob in zip(inputs, dropout_keep_probs)
     # ]
     # inputs = [(input_ * mask) / keep_prob for input_, mask, keep_prob in zip(inputs, dropout_masks, dropout_keep_probs)]
-    # TODO(chunyu): Currently we skip dropout. 
-    lora_a_outs = triton_grouped_gemm(inputs, [adapter.lora_A.weight.T.contiguous() for adapter in adapters])
+    # FIXME(chunyu): Currently we skip dropout. 
+    lora_a_outs = triton_grouped_gemm(
+        [inp.contiguous() for inp in inputs], [adapter.lora_A.weight.T.contiguous() for adapter in adapters]
+    )
     lora_b_outs = triton_grouped_gemm(lora_a_outs, [adapter.lora_B.weight.T.contiguous() for adapter in adapters])
     scaled_lora_outs = [lora_b_out * adapter.scaling for lora_b_out, adapter in zip(lora_b_outs, adapters)]
     # ctx.lora_dropout_masks = dropout_masks   # for backward pass
