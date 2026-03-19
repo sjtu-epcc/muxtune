@@ -36,6 +36,13 @@ class ModelGraphManager:
             partition_plan: TODO(chunyu): to be defined.
         """
         raise NotImplementedError
+    
+    def get_subgraph(self, subgraph_index: int, hybrid_task_index: int) -> "SubGraph":
+        assert hybrid_task_index in self._subgraphs, \
+            f"Invalid hybrid task index: {hybrid_task_index}"
+        assert -1 < subgraph_index < len(self._subgraphs[0]), \
+            f"Invalid subgraph index: {subgraph_index}"
+        return self._subgraphs[hybrid_task_index][subgraph_index]
 
 
 class SubGraphType(enum.Enum):
