@@ -10,6 +10,7 @@ import enum
 import torch
 from torch import nn
 
+from muxtune.core.graph.partition import PartitionPlan
 from muxtune.core.data.tensors import ChunkedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
@@ -28,12 +29,12 @@ class ModelGraphManager:
         self.hybrid_task_indices = hybrid_task_indices
         self._subgraphs = {}    # hybrid task index -> List[SubGraph]
     
-    def construct_subgraphs(self, model: nn.Module, partition_plan: Any):
+    def construct_subgraphs(self, model: nn.Module, partition_plan: PartitionPlan):
         """ Construct subgraphs from hybrid tasks and partitioning plan. 
         
-        args:
-            model: The backbone model.
-            partition_plan: TODO(chunyu): to be defined.
+        Args:
+            model (nn.Module): The backbone model.
+            partition_plan (PartitionPlan): Model graph partition plan for all hybrid tasks.
         """
         raise NotImplementedError
     
