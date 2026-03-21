@@ -23,6 +23,9 @@ class GraphExecutor:
     Each hybrid task maintains different sub-graphs for the same set 
     of model operators. All hybrid tasks share the same partitioning 
     plan of the PEFT model.
+
+    TODO(chunyu): currently only support PEFT tasks with the same base 
+    operator type.
     """
 
     def __init__(self, hybrid_task_indices: List[int]):
