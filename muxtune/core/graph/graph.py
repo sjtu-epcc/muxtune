@@ -14,11 +14,11 @@ from muxtune.core.graph.partition import PartitionPlan
 from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
-__all__ = [ "ModelGraphManager", "SubGraphType", "SubGraph", ]
+__all__ = [ "GraphExecutor", "SubGraphType", "SubGraph", ]
 
 
-class ModelGraphManager:
-    """ Model graph manager. 
+class GraphExecutor:
+    """ Model graph executor. 
     
     Each hybrid task maintains different sub-graphs for the same set 
     of model operators. All hybrid tasks share the same partitioning 
@@ -27,8 +27,9 @@ class ModelGraphManager:
 
     def __init__(self, hybrid_task_indices: List[int]):
         self.hybrid_task_indices = hybrid_task_indices
-        self._subgraphs = {}        # hybrid task index -> List[SubGraph]
-        self._depth = 0             # number of sub-graphs per hybrid task
+        self._subgraphs = {}                # hybrid task index -> List[SubGraph]
+        self._depth = 0                     # number of sub-graphs per hybrid task
+        self._backward_throttler = None     # of the last layer
     
     def construct_subgraphs(self, model: nn.Module, partition_plan: PartitionPlan):
         """ Construct subgraphs from hybrid tasks and partitioning plan. 
@@ -39,7 +40,7 @@ class ModelGraphManager:
         """
         raise NotImplementedError
     
-    def step(self, subgraph_index: int, input_tensor: MixedTensor):
+    def step(self, subgraph_index: int, input_tensor: MixedTensor) -> MixedTensor:
         """ Execute sub-graphs with the given index. """
         
         output_tensor = MixedTensor()
@@ -48,13 +49,18 @@ class ModelGraphManager:
             output_tensor[hybrid_task_index] = subgraph(chunked_inputs)
         return output_tensor
     
-    def execute(self, input_tensor: MixedTensor) -> MixedTensor:
-        """ Execute all sub-graphs. """
+    def forward(self, input_tensor: MixedTensor) -> MixedTensor:
+        """ Forward all sub-graphs for a given microbatch. """
 
         output_tensor = input_tensor    
         for subgraph_index in range(self._depth):
             output_tensor = self.step(subgraph_index, output_tensor)
         return output_tensor
+    
+    def backward(self, losses: MixedTensor[int, torch.tensor], hybrid_task_index: int) -> None:
+        """ Backward losses of a hybrid task at the last backbone layer. """
+        assert hybrid_task_index in self.hybrid_task_indices
+        self._backward_throttler.backward(losses, hybrid_task_index)
     
     def get_subgraph(self, subgraph_index: int, hybrid_task_index: int) -> "SubGraph":
         assert hybrid_task_index in self._subgraphs, \
