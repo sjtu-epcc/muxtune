@@ -22,8 +22,9 @@ class BasicFuncTest(unittest.TestCase):
 
         from muxtune.models.adapters.lora import LoraAdapter, LoraInputDispatcher, LoraOutputAggregator
         from muxtune.core.modules.peft_modules import PeftModuleConfig, PeftModule, PeftModuleGroup
-        from muxtune.core.modules.utils import BackwardThrottler, NonBaseOpModule
+        from muxtune.core.modules.utils import BackwardThrottler
         from muxtune.core.data.tensors import MixedTensor, ChunkedTensor
+        from muxtune.core.graph import ModelGraphManager, SubGraphType, SubGraph
         from muxtune.global_envs import PeftType, global_configs, logger
 
         class DummyBackbone(torch.nn.Module):
@@ -50,13 +51,26 @@ class BasicFuncTest(unittest.TestCase):
         peft_module = PeftModule(config)
         peft_module_group.add_peft_module(peft_module)
 
-        # Non-base operator layers
-        nonbase_op_module = NonBaseOpModule()
-        backbone.input_layer = nonbase_op_module.hook_to_nonbase_op(backbone.input_layer)
-
-        # Last layer
+        # last layer
         bw_throttler = BackwardThrottler()
         backbone.output_layer = bw_throttler.hook_to_nonbase_op(backbone.output_layer)
+
+        graph_manager = ModelGraphManager(hybrid_task_indices=[0, ])
+        # FIXME(chunyu): manually construct and insert subgraphs
+        subgraph_0 = SubGraph(SubGraphType.NON_PEFT_COMPUTE, 0, 0)
+        subgraph_0.record(backbone.input_layer)
+        subgraph_1 = SubGraph(SubGraphType.PEFT_COMPUTE, 1, 0)
+        subgraph_1.record(backbone.base_op)
+        subgraph_2 = SubGraph(SubGraphType.NON_PEFT_COMPUTE, 2, 0)
+        subgraph_2.record(backbone.output_layer)
+        subgraph_0.prev = None
+        subgraph_0.next = subgraph_1
+        subgraph_1.prev = subgraph_0
+        subgraph_1.next = subgraph_2
+        subgraph_2.prev = subgraph_1
+        subgraph_2.next = None
+        graph_manager._subgraphs[0] = [subgraph_0, subgraph_1, subgraph_2]
+        graph_manager._depth = 3
 
         task_names = ["task_0", "task_1", ]
         task_inputs = [
@@ -82,12 +96,12 @@ class BasicFuncTest(unittest.TestCase):
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_0"
         input_task_0 = MixedTensor(chunked_tensors={ 0: [task_inputs[0]] })
-        peft_out_0 = backbone(input_task_0)
+        peft_out_0 = graph_manager.execute(input_task_0)
         logger.info(f"Single-task forward output of task_0: {peft_out_0}\n\n")
 
         os.environ["FORCED_ADAPTER_NAME_DEBUG"] = "peft_module_0::task_1"
         input_task_1 = MixedTensor(chunked_tensors={ 0: [task_inputs[1]] })
-        peft_out_1 = backbone(input_task_1)
+        peft_out_1 = graph_manager.execute(input_task_1)
         logger.info(f"Single-task forward output of task_1: {peft_out_1}\n\n")
 
         del os.environ["FORCED_ADAPTER_NAME_DEBUG"]
@@ -112,7 +126,7 @@ class BasicFuncTest(unittest.TestCase):
         single_b1 = peft_module.adapters["peft_module_0::task_1"].lora_B.weight.grad.clone()
 
         batched_in = MixedTensor(chunked_tensors={ 0: [torch.cat(task_inputs, dim=1)] })
-        batched_out = backbone(batched_in)
+        batched_out = graph_manager.execute(batched_in)
         logger.info(f"Multi-task batched forward output: {batched_out}")
 
         optimizer_0.zero_grad()

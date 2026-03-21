@@ -15,7 +15,7 @@ from torch import nn
 from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import global_configs
 
-__all__ = [ "BackwardThrottler", "NonBaseOpModule" ]
+__all__ = [ "BackwardThrottler" ]
 
 
 class BackwardThrottler(nn.Module):
@@ -91,21 +91,13 @@ class BackwardThrottler(nn.Module):
         setattr(nonbase_op, prev_fw_func_name, nonbase_op.forward)
         self.nonbase_op = nonbase_op
 
-        def __hooked_forward(module, *args, **kwargs) -> MixedTensor:
+        def __hooked_forward(module, *args, **kwargs) -> torch.Tensor:
             bw_throttler = getattr(module, attr_name)
-            input_tensors = args[0]
+            input_tensor = args[0]
+            hybrid_task_index = kwargs.get("hybrid_task_index", None)
             module_op_func = getattr(module, prev_fw_func_name)
-            output_tensors = MixedTensor()
-            for (hybrid_task_index, chunked_input_tensors) in input_tensors.items():
-                chunked_output_tensors = []
-                for chunk in chunked_input_tensors:
-                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
-                    output_tensor = bw_throttler(chunk.value, hybrid_task_index)
-                    output_tensor = module_op_func(output_tensor)
-                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[hybrid_task_index] = chunked_output_tensors
-            
-            return output_tensors
+            output_tensor = bw_throttler(input_tensor, hybrid_task_index)
+            return module_op_func(output_tensor)
 
         # Overriding a GraphModuleImpl forward freezes the forward call and 
         # later modifications on the graph will fail.
@@ -120,63 +112,4 @@ class BackwardThrottler(nn.Module):
                 functools.partial(__hooked_forward, nonbase_op), 
                 getattr(nonbase_op, prev_fw_func_name),
             )
-        return nonbase_op
-
-
-class NonBaseOpModule:
-    """ Non-base operator module to enable spatial-temporal (intra-stage) execution of PEFT tasks.
-    
-    This module should be hooked to every non-baseop nn.Module in the model, taking an 
-    `MixedTensor` object as the input, and sequentially executing each batched tensor.
-    """
-
-    def __init__(self):
-        self.nonbase_op = None
-    
-    def hook_to_nonbase_op(
-        self, nonbase_op: nn.Module, attr_name: str = "nonbase_op_module", 
-        prev_fw_func_name: str = "prev_fw_func",
-    ) -> nn.Module:
-        """ Hook to the non-base operator. 
-        
-        Args:
-            nonbase_op: The non-base operator to be hooked.
-            attr_name: The attribute name of the non-base operator module 
-                (default: "nonbase_op_module").
-            prev_fw_func_name: The attribute name of the original forward function of the 
-                non-base operator after hooked (default: "prev_fw_func").
-        """
-        assert self.nonbase_op is None, "Non-base operator module has already been hooked."
-        setattr(nonbase_op, attr_name, self)
-        setattr(nonbase_op, prev_fw_func_name, nonbase_op.forward)
-        self.nonbase_op = nonbase_op
-
-        def __hooked_forward(module, *args, **kwargs) -> MixedTensor:
-            input_tensors = args[0]
-            nonbase_op_func = getattr(module, prev_fw_func_name)
-            output_tensors = MixedTensor()
-            for (hybrid_task_index, chunked_input_tensors) in input_tensors.items():
-                chunked_output_tensors = []
-                for chunk in chunked_input_tensors:
-                    chunk_mask, layout = chunk.chunk_mask, chunk.layout
-                    output_tensor = nonbase_op_func(chunk.value)
-                    chunked_output_tensors.append(ChunkedTensor(output_tensor, chunk_mask, layout))
-                output_tensors[hybrid_task_index] = chunked_output_tensors
-            
-            return output_tensors
-        
-        # Overriding a GraphModuleImpl forward freezes the forward call and 
-        # later modifications on the graph will fail.
-        # Reference: https://pytorch.slack.com/archives/C3PDTEV8E/p1705929610405409
-        if "GraphModuleImpl" in str(type(nonbase_op)):
-            nonbase_op.__class__.forward = functools.update_wrapper(
-                functools.partial(__hooked_forward, nonbase_op), 
-                getattr(nonbase_op, prev_fw_func_name),
-            )
-        else:
-            nonbase_op.forward = functools.update_wrapper(
-                functools.partial(__hooked_forward, nonbase_op), 
-                getattr(nonbase_op, prev_fw_func_name),
-            )
-
         return nonbase_op

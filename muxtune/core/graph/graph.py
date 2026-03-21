@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from muxtune.core.graph.partition import PartitionPlan
-from muxtune.core.data.tensors import ChunkedTensor
+from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
 __all__ = [ "ModelGraphManager", "SubGraphType", "SubGraph", ]
@@ -27,7 +27,8 @@ class ModelGraphManager:
 
     def __init__(self, hybrid_task_indices: List[int]):
         self.hybrid_task_indices = hybrid_task_indices
-        self._subgraphs = {}    # hybrid task index -> List[SubGraph]
+        self._subgraphs = {}        # hybrid task index -> List[SubGraph]
+        self._depth = 0             # number of sub-graphs per hybrid task
     
     def construct_subgraphs(self, model: nn.Module, partition_plan: PartitionPlan):
         """ Construct subgraphs from hybrid tasks and partitioning plan. 
@@ -37,6 +38,23 @@ class ModelGraphManager:
             partition_plan (PartitionPlan): Model graph partition plan for all hybrid tasks.
         """
         raise NotImplementedError
+    
+    def step(self, subgraph_index: int, input_tensor: MixedTensor):
+        """ Execute sub-graphs with the given index. """
+        
+        output_tensor = MixedTensor()
+        for (hybrid_task_index, chunked_inputs) in input_tensor.items():
+            subgraph = self.get_subgraph(subgraph_index, hybrid_task_index)
+            output_tensor[hybrid_task_index] = subgraph(chunked_inputs)
+        return output_tensor
+    
+    def execute(self, input_tensor: MixedTensor) -> MixedTensor:
+        """ Execute all sub-graphs. """
+
+        output_tensor = input_tensor    
+        for subgraph_index in range(self._depth):
+            output_tensor = self.step(subgraph_index, output_tensor)
+        return output_tensor
     
     def get_subgraph(self, subgraph_index: int, hybrid_task_index: int) -> "SubGraph":
         assert hybrid_task_index in self._subgraphs, \
@@ -66,15 +84,6 @@ class SubGraph:
         subgraph_index: The global index of a single subgraph in the model 
             graph, same across hybrid tasks.
         hybrid_task_index: The global index of the hybrid task.
-    
-    Examples:
-        >>> # pesudocode for how sub-graphs of the same index are executed
-        >>> # input: subgraph_index (int), inputs (MixedTensor)
-        >>> outputs = MixedTensor()
-        >>> for (hybrid_task_index, chunked_inputs) in inputs.items():
-        >>>     subgraph = get_subgraph(subgraph_index, hybrid_task_index)
-        >>>     outputs[hybrid_task_index] = subgraph(chunked_inputs)
-        >>> return outputs
     """
 
     def __init__(
@@ -95,7 +104,7 @@ class SubGraph:
     def forward(self, chunked_input_tensors: List[ChunkedTensor]) -> List[ChunkedTensor]:
         chunked_output_tensors = []
         if self.type == SubGraphType.NON_PEFT_COMPUTE:
-            if self.prev.type == SubGraphType.COMMUNICATE:
+            if self.prev and self.prev.type == SubGraphType.COMMUNICATE:
                 # wait for communication complete
                 compute_stream = stream_manager.get_compute_stream()
                 prev_subgraph_index = self.prev.subgraph_index
@@ -105,7 +114,10 @@ class SubGraph:
             for chunk in chunked_input_tensors:
                 tensor, chunk_mask, layout = chunk.value, chunk.chunk_mask, chunk.layout
                 for module in self._modules:
-                    tensor = module(tensor)
+                    if hasattr(module, "backward_throttler"):
+                        tensor = module(tensor, hybrid_task_index=self.hybrid_task_index)
+                    else:
+                        tensor = module(tensor)
                 chunked_output_tensors.append(ChunkedTensor(tensor, chunk_mask, layout))
         
         elif self.type == SubGraphType.COMMUNICATE:
