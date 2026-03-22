@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 # Author: Chunyu Xue
 
-""" Model graph partitioning implementation. """
+""" Model compiling and graph partitioning implementation. """
 
 from typing import Tuple, Dict, List, Any
 

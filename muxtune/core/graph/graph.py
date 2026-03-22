@@ -10,7 +10,7 @@ import enum
 import torch
 from torch import nn
 
-from muxtune.core.graph.partition import PartitionPlan
+from muxtune.core.graph.compile import PartitionPlan
 from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
