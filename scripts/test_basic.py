@@ -186,8 +186,6 @@ class BasicFuncTest(unittest.TestCase):
             post_process = mpu.is_pipeline_last_stage()
             return GPTModel(megatron_config, vocab_size, max_seq_len, pre_process, post_process, device=device)
 
-        # TODO(chunyu): implement chunk-level aligner, and correctness verification.
-
         model_type = ModelType.GPT
         global_bs = 8
         seq_len = 1024
@@ -201,7 +199,7 @@ class BasicFuncTest(unittest.TestCase):
         num_iters = 5
         
         global_configs.tensor_model_parallel_size = 1
-        global_configs.pipeline_model_parallel_size = 1
+        global_configs.pipeline_model_parallel_size = 2
         global_configs.data_parallel_size = 1
 
         global_configs.num_nodes = 1
@@ -258,39 +256,17 @@ class BasicFuncTest(unittest.TestCase):
         train_data_iterator = get_train_data_iterator(
             vocab_size, global_bs, num_micro_batches, seq_len, num_iters=num_iters,
         )
+        # intermediate_ = {
+        #     "input_ids": tokens,
+        #     "position_ids": position_ids,
+        #     "decoder_input": None,
+        #     "attention_mask": attention_mask, 
+        #     "labels": labels,
+        # }
+        # for submodule in submodules:
+        #     intermediate_ = submodule(intermediate_)
 
-        submodules = model[0].module.module.get_submodules()
-        model = model[0]
-        megatron_config = get_attr_wrapped_model(model, attr="config")
-        # Input batch
-        (tokens, labels, loss_mask, 
-            attention_mask, position_ids) = get_input_batch(
-                data_iterator=train_data_iterator,
-                micro_batch_size=(
-                    megatron_config.global_batch_size // megatron_config.num_micro_batches
-                ),
-                seq_len=megatron_config.sequence_length,
-                pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-        )
-        # Forward
-        output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
-        
-        args = (tokens, position_ids, )
-        intermediate_ = {
-            "input_ids": tokens,
-            "position_ids": position_ids,
-            "decoder_input": None,
-            "attention_mask": attention_mask, 
-            "labels": labels,
-        }
-        for submodule in submodules:
-            intermediate_ = submodule(intermediate_)
-            print(submodule.__class__, intermediate_.keys())
-            print("")
-
-        print("Output of sub-module implementation:", intermediate_)
-        print("Output of torch model:", output_tensor)
-        exit(0)
+        # TODO(chunyu): integrate sub-module implementation into megatron training.
 
         (optimizers, opt_param_schedulers) = get_optimizers_and_schedulers(
             model, global_bs, num_iters, fp16=(dtype == torch.float16), params_dtype=dtype, 

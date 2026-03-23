@@ -14,7 +14,7 @@ __all__ = [
 ]
 
 
-class SubModuleBase(torch.nn.Module, ABC):
+class SubModuleBase(ABC):
     """ Base class for sub-module. """
 
     def __init__(self):
@@ -34,6 +34,9 @@ class SubModuleBase(torch.nn.Module, ABC):
             input_keywords (List[str]): List of keywords required in this sub-module.
         """
         pass
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
 
 
 class WrappedTensor:
