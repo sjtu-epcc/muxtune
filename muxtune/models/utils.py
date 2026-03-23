@@ -2,42 +2,38 @@
 # -*- coding:utf-8 -*-
 # Author: Chunyu Xue
 
-from typing import Optional
-from dataclasses import dataclass
+from typing import Dict, List, Any
+from abc import ABC, abstractmethod
 
 import torch
 from torch import nn
 
 __all__ = [
+    "SubModuleBase",
     "WrappedTensor",
 ]
 
 
-@dataclass
-class SubModuleData:
-    """ Data collection between sub-modules. 
-    
-    Each sub-module strictly takes a `SubModuleData` as its input, computes, then 
-    produces another `SubModuleData` as its output (input to the next sub-module).
-    """
+class SubModuleBase(torch.nn.Module, ABC):
+    """ Base class for sub-module. """
 
-    input_ids: nn.Tensor = None
-    
-    position_ids: nn.Tensor = None
+    def __init__(self):
+        super().__init__()
 
-    attention_mask: nn.Tensor = None
-
-    decoder_input: nn.Tensor = None
-
-    labels: nn.Tensor = None
-
-    loss_mask: nn.Tensor = None
-
-    runtime_gather_output: Optional[bool] = None    
-
-    hidden_states: nn.Tensor = None
-
-    bias: nn.Tensor = None
+    @abstractmethod
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        """ Forward the sub-module with any user-defined codes.
+        Any child class must adhere to the input argument format.
+        
+        Args:
+            intermediate_(Dict[str, Any]): Intermediate object that includes all required 
+                input keyword arguments, and those required by the latter sub-modules.
+            input_keywords (List[str]): List of keywords required in this sub-module.
+        """
+        pass
 
 
 class WrappedTensor:

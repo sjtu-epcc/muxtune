@@ -5,7 +5,7 @@
 """ Megatron parallel linear layers. """
 
 import os
-from typing import Literal, Optional
+from typing import Literal, Optional, Dict, Any, List
 
 import torch
 from torch.nn.parameter import Parameter
@@ -14,8 +14,7 @@ from megatron.core import mpu
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from muxtune.models.utils import SubModuleData
-
+from muxtune.models.utils import SubModuleBase
 
 __all__ = [
     "LanguageModelEmbedding",
@@ -97,6 +96,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.dtype = dtype
         self.skip_bias_add = skip_bias_add
         self.is_expert = is_expert
+        self.is_output_layer = kwargs.get("is_output_layer", False)
 
         self.weight = Parameter(
             torch.empty(
@@ -127,7 +127,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.copy_module = CopyToModelParallelModule()
         self.linear_module = LinearAsyncAllReduceModule(
             self.weight, bias=(self.bias if not self.skip_bias_add else None), 
-            skip_bias_add=self.skip_bias_add, return_bias=True,
+            skip_bias_add=self.skip_bias_add, return_bias=True, 
+            is_output_layer=self.is_output_layer,
         )
 
     def forward(
@@ -263,20 +264,24 @@ class RowParallelLinear(torch.nn.Module):
         return [self.linear_module, self.reduce_module]
 
 
-class CopyToModelParallelModule(torch.nn.Module):
+class CopyToModelParallelModule(SubModuleBase):
 
     module_type = "communicate"
    
     def __init__(self):
         super().__init__()
 
-    def forward(self, data: SubModuleData):
-        input_ = data.hidden_states
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
         output_ = _CopyToModelParallelRegion.apply(input_)
-        return SubModuleData(hidden_states=output_)
+        intermediate_["hidden_states"] = output_
+        return intermediate_
 
 
-class ReduceFromModelParallelModule(torch.nn.Module):
+class ReduceFromModelParallelModule(SubModuleBase):
 
     module_type = "communicate"
 
@@ -286,8 +291,11 @@ class ReduceFromModelParallelModule(torch.nn.Module):
         self.bias = bias
         self.skip_bias_add = skip_bias_add
     
-    def forward(self, data: SubModuleData):
-        input_ = data.hidden_states
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
         output_ = _ReduceFromModelParallelRegion.apply(input_)
         if not self.skip_bias_add:
             output = (output_ + self.bias) if self.bias is not None else output_
@@ -295,29 +303,40 @@ class ReduceFromModelParallelModule(torch.nn.Module):
         else:
             output = output_
             output_bias = self.bias
-        return SubModuleData(hidden_states=output, bias=output_bias)
+        intermediate_["hidden_states"] = output
+        intermediate_["bias"] = output_bias
+        return intermediate_
 
 
-class LinearAsyncAllReduceModule(torch.nn.Module):
+class LinearAsyncAllReduceModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, 
-                 skip_bias_add: bool = False, return_bias: bool = False):
+    def __init__(
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, 
+        skip_bias_add: bool = False, return_bias: bool = False, 
+        is_output_layer: bool = False,
+    ):
         super().__init__()
         self.weight = weight
         self.bias = bias
         self.skip_bias_add = skip_bias_add
         self.return_bias = return_bias
+        self.is_output_layer = is_output_layer
 
-    def forward(self, data: SubModuleData):
-        input_ = data.hidden_states
-        output = linear_with_grad_accumulation_and_async_allreduce(input_, self.weight, self.bias)
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
+        output = linear_with_grad_accumulation_and_async_allreduce(
+            input_, self.weight, self.bias)
+        keyword = "hidden_states" if not self.is_output_layer else "logits"
+        intermediate_[keyword] = output
         if self.return_bias:
             output_bias = self.bias if self.skip_bias_add else None
-            return SubModuleData(hidden_states=output, bias=output_bias)
-        else:
-            return SubModuleData(hidden_states=output)
+            intermediate_["bias"] = output_bias
+        return intermediate_
 
 
 def linear_with_grad_accumulation_and_async_allreduce(

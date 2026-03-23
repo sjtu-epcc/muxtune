@@ -4,7 +4,7 @@
 
 """ Megatron transformer layer. """
 
-from typing import Any, Dict, Optional, Union, Callable
+from typing import Any, Dict, Optional, Union, Callable, List
 
 import torch
 from torch import Tensor
@@ -18,6 +18,7 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 
 from muxtune.models.backbones.attention import SelfAttention
 from muxtune.models.backbones.mlp import MLP
+from muxtune.models.utils import SubModuleBase
 
 __all__ = [ "TransformerLayer", ]
 
@@ -212,7 +213,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return submodules
 
 
-class InputLayerNormModule(torch.nn.Module):
+class InputLayerNormModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -220,12 +221,18 @@ class InputLayerNormModule(torch.nn.Module):
         super().__init__()
         self.input_layernorm = input_layernorm
 
-    def forward(self, input_: torch.Tensor, *args, **kwargs):
-        residual = input_
-        return self.input_layernorm(input_), residual, args, kwargs
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
+        intermediate_["residual"] = input_
+        output_ = self.input_layernorm(input_)
+        intermediate_["hidden_states"] = output_
+        return intermediate_
 
 
-class PreMlpLayerNormModule(torch.nn.Module):
+class PreMlpLayerNormModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -233,9 +240,15 @@ class PreMlpLayerNormModule(torch.nn.Module):
         super().__init__()
         self.pre_mlp_layernorm = pre_mlp_layernorm
 
-    def forward(self, input_: torch.Tensor, *args, **kwargs):
-        residual = input_
-        return self.pre_mlp_layernorm(input_), residual, args, kwargs
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
+        intermediate_["residual"] = input_
+        output_ = self.pre_mlp_layernorm(input_)
+        intermediate_["hidden_states"] = output_
+        return intermediate_
 
 
 class BiasDropoutAddModule(torch.nn.Module):
@@ -253,10 +266,16 @@ class BiasDropoutAddModule(torch.nn.Module):
         self.bias_dropout_fusion = bias_dropout_fusion
         self.hidden_dropout = hidden_dropout
     
-    def forward(self, input_: torch.Tensor, residual: torch.Tensor, *args, **kwargs):
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
+        bias = intermediate_.pop("bias")
+        residual = intermediate_.pop("residual")
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.bda(self.training, self.bias_dropout_fusion)(
-                input_, residual, self.hidden_dropout,
+                (input_, bias), residual, self.hidden_dropout,
             )
         
         # Jit compiled function creates 'view' tensor. This tensor
@@ -265,8 +284,8 @@ class BiasDropoutAddModule(torch.nn.Module):
         # won't result in memory savings (like the data loader, or
         # p2p_communication), it serves to document the origin of this
         # 'view' tensor.
-        output = make_viewless_tensor(
+        output_ = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
-
-        return output, args, kwargs
+        intermediate_["hidden_states"] = output_
+        return intermediate_

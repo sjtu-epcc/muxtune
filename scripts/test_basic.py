@@ -194,18 +194,18 @@ class BasicFuncTest(unittest.TestCase):
         num_micro_batches = 2
         hidden_size = 4096
         num_attention_heads = 32
-        num_layers = 16
+        num_layers = 4
         dtype = torch.float16
         device = "cuda"
         vocab_size = 50000
         num_iters = 5
         
         global_configs.tensor_model_parallel_size = 1
-        global_configs.pipeline_model_parallel_size = 2
+        global_configs.pipeline_model_parallel_size = 1
         global_configs.data_parallel_size = 1
 
         global_configs.num_nodes = 1
-        global_configs.num_devices_per_node = 2
+        global_configs.num_devices_per_node = 1
         
         # Get number of microbatches
         # In Megatron, each DP replica constantly processes `micro_batch_size` samples per micro-batch, 
@@ -255,12 +255,11 @@ class BasicFuncTest(unittest.TestCase):
         model = model_provider(**model_kwargs) if model_provider else None
         model = setup_model(model)
 
-        submodules = model[0].module.module.get_submodules()
-
         train_data_iterator = get_train_data_iterator(
             vocab_size, global_bs, num_micro_batches, seq_len, num_iters=num_iters,
         )
 
+        submodules = model[0].module.module.get_submodules()
         model = model[0]
         megatron_config = get_attr_wrapped_model(model, attr="config")
         # Input batch
@@ -274,15 +273,23 @@ class BasicFuncTest(unittest.TestCase):
                 pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
         )
         # Forward
-        # output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+        output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
         
         args = (tokens, position_ids, )
-        kwargs = {"attention_mask": attention_mask, "labels": labels}
-        intermediate_ = args, kwargs
+        intermediate_ = {
+            "input_ids": tokens,
+            "position_ids": position_ids,
+            "decoder_input": None,
+            "attention_mask": attention_mask, 
+            "labels": labels,
+        }
         for submodule in submodules:
-            ret = submodule(*args, **kwargs)
+            intermediate_ = submodule(intermediate_)
+            print(submodule.__class__, intermediate_.keys())
+            print("")
 
-        # TODO(chunyu): how we transfer intermediate arguments between submodules?
+        print("Output of sub-module implementation:", intermediate_)
+        print("Output of torch model:", output_tensor)
         exit(0)
 
         (optimizers, opt_param_schedulers) = get_optimizers_and_schedulers(

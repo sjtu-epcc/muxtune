@@ -47,7 +47,7 @@ class ModelType(enum.Enum):
 
 def initialize_distributed(
     tensor_model_parallel_size: int = 1, pipeline_model_parallel_size: int = 1, 
-    virtual_pipeline_model_parallel_size: int = 1, tp_comm_overlap: bool = False,
+    virtual_pipeline_model_parallel_size: int = None, tp_comm_overlap: bool = False,
 ):
     """ Initialize the Megatron backend. """
     torchrun_world_size = int(os.environ['WORLD_SIZE'])

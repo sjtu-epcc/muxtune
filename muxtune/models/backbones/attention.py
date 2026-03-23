@@ -5,7 +5,7 @@
 """ Megatron attention modules. """
 
 import os
-from typing import Any, Dict, Optional, Union, Tuple, Callable
+from typing import Any, Dict, Optional, Union, Tuple, Callable, List
 import math
 
 import torch
@@ -21,6 +21,7 @@ from megatron.core.transformer.utils import attention_mask_func
 from megatron.core import parallel_state, tensor_parallel
 
 from muxtune.models.backbones.layers import ColumnParallelLinear, RowParallelLinear
+from muxtune.models.utils import SubModuleBase
 
 __all__ = [ "SelfAttention", ]
 
@@ -382,7 +383,7 @@ class DotProductAttention(MegatronModule):
         return context
 
 
-class AttnQKVSplitModule(torch.nn.Module):
+class AttnQKVSplitModule(SubModuleBase):
     
     module_type = "compute"
 
@@ -403,7 +404,11 @@ class AttnQKVSplitModule(torch.nn.Module):
         self.q_layernorm = q_layernorm
         self.k_layernorm = k_layernorm
     
-    def forward(self, mixed_qkv: torch.Tensor, *args, **kwargs):
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        mixed_qkv = intermediate_.pop("hidden_states")
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = mixed_qkv.size()[:-1] + (
             self.num_query_groups_per_partition,
@@ -426,7 +431,9 @@ class AttnQKVSplitModule(torch.nn.Module):
 
         # Return unsplit mixed_qkv and split_arg_list
         if not self.split_qkv:
-            return mixed_qkv, split_arg_list
+            intermediate_["mixed_qkv"] = mixed_qkv
+            intermediate_["split_arg_list"] = split_arg_list
+            return intermediate_
         
         # [sq, b, ng, (np/ng + 2) * hn]
         # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
@@ -441,10 +448,13 @@ class AttnQKVSplitModule(torch.nn.Module):
         if self.k_layernorm is not None:
             key = self.k_layernorm(key)
         
-        return query, key, value, args, kwargs
+        intermediate_["query"] = query
+        intermediate_["key"] = key
+        intermediate_["value"] = value
+        return intermediate_
 
 
-class CoreAttnModule(torch.nn.Module):
+class CoreAttnModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -457,6 +467,14 @@ class CoreAttnModule(torch.nn.Module):
         self.core_attention = core_attention
         self.attn_mask_type = attn_mask_type
     
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, *args, **kwargs):
-        attention_mask = kwargs.get("attention_mask", None)
-        return self.core_attention(query, key, value, attention_mask, self.attn_mask_type), args, kwargs
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["query", "key", "value", ],
+    ):
+        query = intermediate_.pop("query")
+        key = intermediate_.pop("key")
+        value = intermediate_.pop("value")
+        attention_mask = intermediate_["attention_mask"]    # persistant
+        output_ = self.core_attention(query, key, value, attention_mask, self.attn_mask_type)
+        intermediate_["hidden_states"] = output_
+        return intermediate_

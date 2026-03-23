@@ -4,7 +4,7 @@
 
 """ Megatron transformer block. """
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict, Any
 
 import torch
 from torch import Tensor
@@ -15,7 +15,7 @@ from megatron.core.transformer.torch_layer_norm import WrappedTorchLayerNorm
 from megatron.core.utils import make_viewless_tensor
 
 from muxtune.models.backbones.transformer_layer import TransformerLayer
-from muxtune.models.utils import WrappedTensor
+from muxtune.models.utils import WrappedTensor, SubModuleBase
 from muxtune.global_envs import global_configs
 
 __all__ = [ "TransformerBlock", ]
@@ -43,7 +43,7 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
-        self.pre_process_module = TransformerBlockPreProcessModule()
+        self.pre_process_module = TransformerBlockPreProcessModule(self.pre_process)
         self.final_layernorm_module = FinalLayerNormModule(
             self.final_layernorm, self.pre_process, self.layers)
 
@@ -185,15 +185,20 @@ class TransformerBlock(MegatronModule):
         return submodules
 
 
-class TransformerBlockPreProcessModule(torch.nn.Module):
+class TransformerBlockPreProcessModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self):
+    def __init__(self, pre_process: bool):
         super().__init__()
+        self.pre_process = pre_process
         self.input_tensor = None
     
-    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        hidden_states = intermediate_.pop("hidden_states")
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
@@ -218,11 +223,11 @@ class TransformerBlockPreProcessModule(torch.nn.Module):
         #   already creates viewless tensors. That said, make_viewless_tensor()
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
+        intermediate_["hidden_states"] = hidden_states
+        return intermediate_
 
-        return hidden_states, args, kwargs
 
-
-class FinalLayerNormModule(torch.nn.Module):
+class FinalLayerNormModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -235,7 +240,11 @@ class FinalLayerNormModule(torch.nn.Module):
         self.pre_process = pre_process
         self.layers = layers
 
-    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        hidden_states = intermediate_.pop("hidden_states")
         if self.final_layernorm is not None:
             hidden_states = self.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
@@ -247,5 +256,6 @@ class FinalLayerNormModule(torch.nn.Module):
         
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
-
-        return hidden_states
+        
+        intermediate_["hidden_states"] = hidden_states
+        return intermediate_

@@ -5,7 +5,7 @@
 """ Megatron MLP modules. """
 
 import os
-from typing import Any, Dict, Optional, Union, Callable
+from typing import Any, Dict, Optional, Union, Callable, List
 import warnings
 
 import torch
@@ -15,6 +15,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core import mpu
 
 from muxtune.models.backbones.layers import ColumnParallelLinear, RowParallelLinear
+from muxtune.models.utils import SubModuleBase
 
 __all__ = [ "MLP", ]
 
@@ -125,7 +126,7 @@ class MLP(MegatronModule):
         submodules.extend(self.linear_fc2.get_submodules())
         return submodules
 
-class MLPActModule(torch.nn.Module):
+class MLPActModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -133,5 +134,11 @@ class MLPActModule(torch.nn.Module):
         super().__init__()
         self.activation_func = activation_func
     
-    def forward(self, input_: torch.Tensor, *args, **kwargs):
-        return self.activation_func(input_), args, kwargs
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        input_ = intermediate_.pop("hidden_states")
+        output_ = self.activation_func(input_)
+        intermediate_["hidden_states"] = output_
+        return intermediate_

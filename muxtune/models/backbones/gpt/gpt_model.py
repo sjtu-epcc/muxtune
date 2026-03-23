@@ -5,7 +5,7 @@
 """ Megatron-native GPT model. """
 
 from collections import OrderedDict
-from typing import Dict, Literal, Optional, Union
+from typing import Dict, Literal, Optional, Union, List, Any
 
 import torch
 from torch import Tensor
@@ -17,6 +17,7 @@ from megatron.core.transformer.enums import ModelType
 
 from muxtune.models.backbones.layers import ColumnParallelLinear, LanguageModelEmbedding
 from muxtune.models.backbones.transformer_block import TransformerBlock
+from muxtune.models.utils import SubModuleBase
 
 __all__ = [ "GPTModel", ]
 
@@ -108,12 +109,13 @@ class GPTModel(LanguageModule):
                 gather_output=not self.parallel_output,
                 skip_weight_param_allocation=self.pre_process
                 and self.share_embeddings_and_output_weights,
+                is_output_layer=True,
             )
         
         embedding = self.embedding if self.pre_process else None
         output_layer_weight = self.output_layer.weight if post_process else None
         self.pre_process_module = GPTModelPreProcessModule(
-            embedding, self.config.params_dtype)
+            embedding, self.pre_process, self.config.params_dtype)
         self.post_process_module = GPTModelPostProcessModule(
             embedding, output_layer_weight, self.share_embeddings_and_output_weights, 
             self.pre_process, self.post_process)
@@ -273,22 +275,24 @@ class GPTModel(LanguageModule):
         return submodules
 
 
-class GPTModelPreProcessModule(torch.nn.Module):
+class GPTModelPreProcessModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, embedding: LanguageModelEmbedding, params_dtype: torch.dtype):
+    def __init__(self, embedding: LanguageModelEmbedding, pre_process: bool, 
+                 params_dtype: torch.dtype):
         super().__init__()
         self.embedding = embedding
+        self.pre_process = pre_process
         self.params_dtype = params_dtype
     
     def forward(
-        self, 
-        input_ids: Tensor,
-        position_ids: Tensor,
-        decoder_input: Tensor = None,
-        *args, **kwargs,
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["input_ids", "position_ids", "decoder_input", ],
     ):
+        input_ids = intermediate_.pop("input_ids")
+        position_ids = intermediate_.pop("position_ids")
+        decoder_input = intermediate_.pop("decoder_input")
         # Decoder embedding.
         if decoder_input is not None:
             pass
@@ -303,10 +307,11 @@ class GPTModelPreProcessModule(torch.nn.Module):
         if decoder_input is not None and decoder_input.dtype != self.params_dtype:
             decoder_input = decoder_input.to(self.params_dtype)
 
-        return decoder_input, args, kwargs
+        intermediate_["hidden_states"] = decoder_input
+        return intermediate_
 
 
-class GPTModelPostProcessModule(torch.nn.Module):
+class GPTModelPostProcessModule(SubModuleBase):
 
     module_type = "compute"
 
@@ -325,8 +330,11 @@ class GPTModelPostProcessModule(torch.nn.Module):
         self.pre_process =pre_process
         self.post_process = post_process
     
-    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
-        # logits and loss
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["hidden_states", ],
+    ):
+        hidden_states = intermediate_.pop("hidden_states")
         output_weight = None
         if self.share_embeddings_and_output_weights:
             if self.pre_process:
@@ -343,18 +351,24 @@ class GPTModelPostProcessModule(torch.nn.Module):
             else:
                 output_weight = None
 
-        return hidden_states, output_weight, args, kwargs,
+        intermediate_["hidden_states"] = hidden_states
+        intermediate_["output_weight"] = output_weight
+        return intermediate_
 
 
-class ComputeLossModule(torch.nn.Module):
+class ComputeLossModule(SubModuleBase):
 
     module_type = "compute"
 
     def __init__(self, ):
         super().__init__()
-    
-    def forward(self, logits: torch.Tensor, *args, **kwargs):
-        labels = kwargs.get("labels", None)
+
+    def forward(
+        self, intermediate_: Dict[str, Any], 
+        input_keywords: List[str] = ["logits", "labels", ],
+    ):
+        logits = intermediate_.pop("logits")
+        labels = intermediate_.pop("labels", None)
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
@@ -368,4 +382,5 @@ class ComputeLossModule(torch.nn.Module):
 
         # [s b] => [b, s]
         # loss = loss.transpose(0, 1).contiguous()
-        return loss
+        intermediate_["loss"] = loss
+        return intermediate_
