@@ -14,6 +14,9 @@ from megatron.core import mpu
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from muxtune.models.utils import SubModuleData
+
+
 __all__ = [
     "LanguageModelEmbedding",
     "ColumnParallelLinear",
@@ -77,7 +80,7 @@ class LanguageModelEmbedding(MegatronModule):
 
 
 class ColumnParallelLinear(torch.nn.Module):
-    """ Megatron ColumnParallelLinear. """
+    """ ColumnParallelLinear with sub-module construction. """
 
     def __init__(
         self, input_size, output_size, tp_size, bias, device, dtype, skip_bias_add=False, 
@@ -121,6 +124,12 @@ class ColumnParallelLinear(torch.nn.Module):
             tp_size > 1 and not self.sequence_parallel and not self.disable_grad_reduce
         )
 
+        self.copy_module = CopyToModelParallelModule()
+        self.linear_module = LinearAsyncAllReduceModule(
+            self.weight, bias=(self.bias if not self.skip_bias_add else None), 
+            skip_bias_add=self.skip_bias_add, return_bias=True,
+        )
+
     def forward(
         self,
         input_: torch.Tensor,
@@ -159,9 +168,13 @@ class ColumnParallelLinear(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        return [self.copy_module, self.linear_module]
+
 
 class RowParallelLinear(torch.nn.Module):
-    """ Megatron RowParallelLinear. """
+    """ RowParallelLinear with sub-module construction. """
 
     def __init__(
         self, input_size, output_size, tp_size, bias, device, dtype, input_is_parallel=False, 
@@ -202,6 +215,9 @@ class RowParallelLinear(torch.nn.Module):
 
         self.sequence_parallel = sequence_parallel
         self.explicit_expert_comm = False
+
+        self.linear_module = LinearAsyncAllReduceModule(self.weight, bias=None)
+        self.reduce_module = ReduceFromModelParallelModule(self.bias, self.skip_bias_add)
     
     def forward(self, input_: torch.Tensor):
         """ Forward of RowParallelLinear. """
@@ -241,6 +257,67 @@ class RowParallelLinear(torch.nn.Module):
             output = output_
             output_bias = self.bias
         return output, output_bias
+
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        return [self.linear_module, self.reduce_module]
+
+
+class CopyToModelParallelModule(torch.nn.Module):
+
+    module_type = "communicate"
+   
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, data: SubModuleData):
+        input_ = data.hidden_states
+        output_ = _CopyToModelParallelRegion.apply(input_)
+        return SubModuleData(hidden_states=output_)
+
+
+class ReduceFromModelParallelModule(torch.nn.Module):
+
+    module_type = "communicate"
+
+    def __init__(self, bias: Optional[torch.Tensor] = None, 
+        skip_bias_add: bool = False):
+        super().__init__()
+        self.bias = bias
+        self.skip_bias_add = skip_bias_add
+    
+    def forward(self, data: SubModuleData):
+        input_ = data.hidden_states
+        output_ = _ReduceFromModelParallelRegion.apply(input_)
+        if not self.skip_bias_add:
+            output = (output_ + self.bias) if self.bias is not None else output_
+            output_bias = None
+        else:
+            output = output_
+            output_bias = self.bias
+        return SubModuleData(hidden_states=output, bias=output_bias)
+
+
+class LinearAsyncAllReduceModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, 
+                 skip_bias_add: bool = False, return_bias: bool = False):
+        super().__init__()
+        self.weight = weight
+        self.bias = bias
+        self.skip_bias_add = skip_bias_add
+        self.return_bias = return_bias
+
+    def forward(self, data: SubModuleData):
+        input_ = data.hidden_states
+        output = linear_with_grad_accumulation_and_async_allreduce(input_, self.weight, self.bias)
+        if self.return_bias:
+            output_bias = self.bias if self.skip_bias_add else None
+            return SubModuleData(hidden_states=output, bias=output_bias)
+        else:
+            return SubModuleData(hidden_states=output)
 
 
 def linear_with_grad_accumulation_and_async_allreduce(

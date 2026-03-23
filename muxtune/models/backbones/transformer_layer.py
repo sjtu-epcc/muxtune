@@ -4,7 +4,7 @@
 
 """ Megatron transformer layer. """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, Callable
 
 import torch
 from torch import Tensor
@@ -74,6 +74,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         self.is_moe_layer = False
         
         self.bias_dropout_add_exec_handler = torch.enable_grad
+
+        self.input_layernorm_module = InputLayerNormModule(self.input_layernorm)
+        self.attn_bias_dropout_add_module = BiasDropoutAddModule(
+            self.bias_dropout_add_exec_handler, self.self_attn_bda, self.training, 
+            self.config.bias_dropout_fusion, self.hidden_dropout,
+        )
+        self.pre_mlp_layernorm_module = PreMlpLayerNormModule(self.pre_mlp_layernorm)
+        self.mlp_bias_dropout_add_module = BiasDropoutAddModule(
+            self.bias_dropout_add_exec_handler, self.mlp_bda, self.training, 
+            self.config.bias_dropout_fusion, self.hidden_dropout,
+        )
 
     def forward(self, *args, **kwargs):
         """ Forward method. 
@@ -188,3 +199,74 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         )
 
         return output
+
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        submodules = []
+        submodules.append(self.input_layernorm_module)
+        submodules.extend(self.self_attention.get_submodules())
+        submodules.append(self.attn_bias_dropout_add_module)
+        submodules.append(self.pre_mlp_layernorm_module)
+        submodules.extend(self.mlp.get_submodules())
+        submodules.append(self.mlp_bias_dropout_add_module)
+        return submodules
+
+
+class InputLayerNormModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, input_layernorm: torch.nn.LayerNorm):
+        super().__init__()
+        self.input_layernorm = input_layernorm
+
+    def forward(self, input_: torch.Tensor, *args, **kwargs):
+        residual = input_
+        return self.input_layernorm(input_), residual, args, kwargs
+
+
+class PreMlpLayerNormModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, pre_mlp_layernorm: torch.nn.LayerNorm):
+        super().__init__()
+        self.pre_mlp_layernorm = pre_mlp_layernorm
+
+    def forward(self, input_: torch.Tensor, *args, **kwargs):
+        residual = input_
+        return self.pre_mlp_layernorm(input_), residual, args, kwargs
+
+
+class BiasDropoutAddModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(
+        self, bias_dropout_add_exec_handler: Any, bda: Callable, 
+        training: bool, bias_dropout_fusion: bool, hidden_dropout: float,
+    ):
+        super().__init__()
+        self.bias_dropout_add_exec_handler = bias_dropout_add_exec_handler
+        self.bda = bda
+        self.training = training
+        self.bias_dropout_fusion = bias_dropout_fusion
+        self.hidden_dropout = hidden_dropout
+    
+    def forward(self, input_: torch.Tensor, residual: torch.Tensor, *args, **kwargs):
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.bda(self.training, self.bias_dropout_fusion)(
+                input_, residual, self.hidden_dropout,
+            )
+        
+        # Jit compiled function creates 'view' tensor. This tensor
+        # potentially gets saved in the MPU checkpoint function context,
+        # which rejects view tensors. While making a viewless tensor here
+        # won't result in memory savings (like the data loader, or
+        # p2p_communication), it serves to document the origin of this
+        # 'view' tensor.
+        output = make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        return output, args, kwargs

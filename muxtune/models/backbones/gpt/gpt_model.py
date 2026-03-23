@@ -109,6 +109,15 @@ class GPTModel(LanguageModule):
                 skip_weight_param_allocation=self.pre_process
                 and self.share_embeddings_and_output_weights,
             )
+        
+        embedding = self.embedding if self.pre_process else None
+        output_layer_weight = self.output_layer.weight if post_process else None
+        self.pre_process_module = GPTModelPreProcessModule(
+            embedding, self.config.params_dtype)
+        self.post_process_module = GPTModelPostProcessModule(
+            embedding, output_layer_weight, self.share_embeddings_and_output_weights, 
+            self.pre_process, self.post_process)
+        self.compute_loss_module = ComputeLossModule() if self.post_process else None
     
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Sets input tensor to the model.
@@ -250,4 +259,113 @@ class GPTModel(LanguageModule):
 
         # [s b] => [b, s]
         # loss = loss.transpose(0, 1).contiguous()
-        return loss        
+        return loss   
+
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        submodules = []
+        submodules.append(self.pre_process_module)
+        submodules.extend(self.decoder.get_submodules())
+        submodules.append(self.post_process_module)
+        if self.post_process:
+            submodules.extend(self.output_layer.get_submodules())
+            submodules.append(self.compute_loss_module)
+        return submodules
+
+
+class GPTModelPreProcessModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, embedding: LanguageModelEmbedding, params_dtype: torch.dtype):
+        super().__init__()
+        self.embedding = embedding
+        self.params_dtype = params_dtype
+    
+    def forward(
+        self, 
+        input_ids: Tensor,
+        position_ids: Tensor,
+        decoder_input: Tensor = None,
+        *args, **kwargs,
+    ):
+        # Decoder embedding.
+        if decoder_input is not None:
+            pass
+        elif self.pre_process:
+            decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+        else:
+            # intermediate stage of pipeline
+            # decoder will get hidden_states from encoder.input_tensor
+            decoder_input = None
+        
+        # Convert to params_dtype
+        if decoder_input is not None and decoder_input.dtype != self.params_dtype:
+            decoder_input = decoder_input.to(self.params_dtype)
+
+        return decoder_input, args, kwargs
+
+
+class GPTModelPostProcessModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(
+        self, 
+        embedding: LanguageModelEmbedding,
+        output_layer_weight: torch.Tensor,
+        share_embeddings_and_output_weights: bool,
+        pre_process: bool,
+        post_process: bool,
+    ):
+        super().__init__()
+        self.embedding = embedding
+        self.output_layer_weight = output_layer_weight
+        self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
+        self.pre_process =pre_process
+        self.post_process = post_process
+    
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+        # logits and loss
+        output_weight = None
+        if self.share_embeddings_and_output_weights:
+            if self.pre_process:
+                # Multi-Token Prediction (MTP) need both embedding layer and output layer.
+                # So there will be both embedding layer and output layer in the mtp process stage.
+                # In this case, if share_embeddings_and_output_weights is True, the shared weights
+                # will be stored in embedding layer, and output layer will not have any weight.
+                assert hasattr(
+                    self, 'embedding'
+                ), f"embedding is needed in this pipeline stage, but it is not initialized."
+                output_weight = self.embedding.word_embeddings.weight
+            elif self.post_process:
+                output_weight = self.output_layer_weight
+            else:
+                output_weight = None
+
+        return hidden_states, output_weight, args, kwargs,
+
+
+class ComputeLossModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, ):
+        super().__init__()
+    
+    def forward(self, logits: torch.Tensor, *args, **kwargs):
+        labels = kwargs.get("labels", None)
+        if labels is None:
+            # [s b h] => [b s h]
+            return logits.transpose(0, 1).contiguous()
+        
+        # [b s] => [s b]
+        labels = labels.transpose(0, 1).contiguous()
+        # [s, b, vocab] -> [s, vocab, b]
+        logits = logits.transpose(1, 2).contiguous()    
+        torch_loss_func = torch.nn.CrossEntropyLoss()
+        loss = torch_loss_func(logits, labels)
+
+        # [s b] => [b, s]
+        # loss = loss.transpose(0, 1).contiguous()
+        return loss

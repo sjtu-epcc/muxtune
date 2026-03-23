@@ -43,6 +43,10 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
+        self.pre_process_module = TransformerBlockPreProcessModule()
+        self.final_layernorm_module = FinalLayerNormModule(
+            self.final_layernorm, self.pre_process, self.layers)
+
     def _build_layers(self):
         if global_configs.pipeline_model_parallel_size > 1:
             assert self.config.num_layers % global_configs.pipeline_model_parallel_size == 0
@@ -74,6 +78,7 @@ class TransformerBlock(MegatronModule):
         used by internal code to bypass the input provided by the
         forward_step_func"""
         self.input_tensor = input_tensor
+        self.pre_process_module.input_tensor = input_tensor
     
     def forward(
         self,
@@ -156,6 +161,81 @@ class TransformerBlock(MegatronModule):
             )
         
         # Final layer norm.
+        if self.final_layernorm is not None:
+            hidden_states = self.final_layernorm(hidden_states)
+            # TENorm produces a "viewed" tensor. This will result in schedule.py's
+            # deallocate_output_tensor() throwing an error, so a viewless tensor is
+            # created to prevent this.
+            hidden_states = make_viewless_tensor(
+                inp=hidden_states, requires_grad=True, keep_graph=True
+            )
+        
+        if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
+            hidden_states = hidden_states.clone()
+
+        return hidden_states
+    
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        submodules = []
+        submodules.append(self.pre_process_module)
+        for l_no, layer in enumerate(self.layers):
+            submodules.extend(layer.get_submodules())
+        submodules.append(self.final_layernorm_module)
+        return submodules
+
+
+class TransformerBlockPreProcessModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self):
+        super().__init__()
+        self.input_tensor = None
+    
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+        # Delete the obsolete reference to the initial input tensor if necessary
+        if isinstance(hidden_states, WrappedTensor):
+            hidden_states = hidden_states.unwrap()
+
+        if not self.pre_process:
+            # See set_input_tensor()
+            hidden_states = self.input_tensor
+
+        # Viewless tensor.
+        # - We only need to create a viewless tensor in the case of micro batch
+        #   size (mbs) == 1, since in this case, 'hidden_states.transpose()'
+        #   above creates a view tensor, and '.contiguous()' is a pass-through.
+        #   For mbs >= 2, '.contiguous()' creates a new tensor, eliminating
+        #   the need to make it viewless.
+        #
+        #   However, we don't explicitly check mbs == 1 here because
+        #   make_viewless_tensor() has negligible overhead when its input
+        #   is already viewless.
+        #
+        # - For the 'else' case above, calling make_viewless_tensor() here is
+        #   likely redundant, since p2p_communication.py (likely originator)
+        #   already creates viewless tensors. That said, make_viewless_tensor()
+        #   is called here to be future-proof and corner-case-proof.
+        hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
+
+        return hidden_states, args, kwargs
+
+
+class FinalLayerNormModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(
+        self, final_layernorm: torch.nn.LayerNorm, pre_process: bool, 
+        layers: List[TransformerLayer],
+    ):
+        super().__init__()
+        self.final_layernorm = final_layernorm
+        self.pre_process = pre_process
+        self.layers = layers
+
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
         if self.final_layernorm is not None:
             hidden_states = self.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's

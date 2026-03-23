@@ -11,6 +11,7 @@ from torch import nn
 import torch._dynamo as dynamo
 
 from muxtune.core.graph.ir import IRNode, IRGraph
+from muxtune.global_envs import global_configs
 
 __all__ = [ "PartitionPlan", "compile_model_and_generate_partition_plan", ]
 
@@ -19,7 +20,7 @@ class PartitionPlan:
     """ Model graph partition plan. """
 
     def __init__(self):
-        self._map = {}  # subgraph index -> List[module name]
+        self.map = {}   # subgraph index -> List[module name]
 
 
 def compile_model_and_generate_partition_plan(
@@ -30,7 +31,7 @@ def compile_model_and_generate_partition_plan(
 ) -> PartitionPlan:
     """ Compile the model into IR graph and generate partition plan. 
 
-    Workflow: compile backbone -> mark PEFT modules -> insert communication
+    Workflow: compile backbone -> insert communication -> mark PEFT modules
         -> partition graph -> construct partition plan.
     
     Args:
@@ -41,13 +42,35 @@ def compile_model_and_generate_partition_plan(
     """
 
     graph = _transform_to_ir_graph(backbone, *base_input_args, **base_input_kwargs)
+    graph = _insert_communication_operators(graph)
     graph = _mark_peft_base_operators(graph, peft_base_op_names)
+    
+    for node in graph.nodes:
+        print(node.target)
+    
     raise NotImplementedError
 
 
 def _mark_peft_base_operators(graph: IRGraph, peft_base_op_names: List[str]) -> IRGraph:
     """ Mark PEFT base operators in the model graph. """
-    raise NotImplementedError
+    for node in graph.nodes:
+        if any([name in str(node.target) for name in peft_base_op_names]):
+            setattr(node, "peft_enabled", "True")
+        else:
+            setattr(node, "peft_enabled", "False")
+    return graph
+
+
+def _insert_communication_operators(graph: IRGraph):
+    """ Insert IR nodes of communication primitives in IR graph, based on the 
+    parallelism plan. """
+
+    if (
+        global_configs.pipeline_model_parallel_size == 1 and
+        global_configs.tensor_model_parallel_size == 1 and 
+        global_configs.data_parallel_size == 1
+    ):
+        return graph    # no insertion needed
 
 
 def _transform_to_ir_graph(model: nn.Module, *input_args, **input_kwargs) -> IRGraph:

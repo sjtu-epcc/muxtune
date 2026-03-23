@@ -10,7 +10,6 @@ import enum
 import torch
 from torch import nn
 
-from muxtune.core.graph.compile import PartitionPlan
 from muxtune.core.data.tensors import ChunkedTensor, MixedTensor
 from muxtune.global_envs import stream_manager, global_configs
 
@@ -34,13 +33,8 @@ class GraphExecutor:
         self._depth = 0                     # number of sub-graphs per hybrid task
         self._backward_throttler = None     # of the last layer
     
-    def construct_subgraphs(self, model: nn.Module, partition_plan: PartitionPlan):
-        """ Construct subgraphs from hybrid tasks and partitioning plan. 
-        
-        Args:
-            model (nn.Module): The backbone model.
-            partition_plan (PartitionPlan): Model graph partition plan for all hybrid tasks.
-        """
+    def construct_subgraphs(self, model: nn.Module):
+        """ Construct subgraphs from hybrid tasks and partitioning plan. """
         raise NotImplementedError
     
     def step(self, subgraph_index: int, input_tensor: MixedTensor) -> MixedTensor:
@@ -165,40 +159,3 @@ class SubGraph:
     
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
-
-
-class _GraphModuleBase(torch.nn.Module):
-    """ Customized graph module for intermediate 'non-module' operation. """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-
-    def forward(self, x: Any, *args, **kwargs) -> Any:
-        """ Forward pass. """
-        return x
-
-
-class SplitModule(_GraphModuleBase):
-    """ Split module for torch tensor. """
-
-    def __init__(self, split_sizes: List[int], dim: int,  *args, **kwargs):
-        self.split_sizes = split_sizes
-        self.dim = dim
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        return torch.split(x, self.split_sizes, self.dim)
-
-
-class ResidualConnectModule(_GraphModuleBase):
-    """ Residual connection module. 
-    
-    Graph executor would store intermediate tensor when encountering this module.
-    """
-
-    def __init__(self, *args, **kwargs):
-        self.is_resudual = True
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x

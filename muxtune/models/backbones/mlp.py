@@ -5,7 +5,7 @@
 """ Megatron MLP modules. """
 
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, Callable
 import warnings
 
 import torch
@@ -87,6 +87,8 @@ class MLP(MegatronModule):
             skip_bias_add=True,
             is_expert=is_expert,
         )
+
+        self.act_module = MLPActModule(self.activation_func)
     
     def forward(self, hidden_states, per_token_scale=None):
         """ Forward method. """
@@ -114,3 +116,22 @@ class MLP(MegatronModule):
             output_bias = None    
 
         return output, output_bias
+
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        submodules = []
+        submodules.extend(self.linear_fc1.get_submodules())
+        submodules.append(self.act_module)
+        submodules.extend(self.linear_fc2.get_submodules())
+        return submodules
+
+class MLPActModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(self, activation_func: Callable):
+        super().__init__()
+        self.activation_func = activation_func
+    
+    def forward(self, input_: torch.Tensor, *args, **kwargs):
+        return self.activation_func(input_), args, kwargs

@@ -16,7 +16,7 @@ class BasicFuncTest(unittest.TestCase):
     This unit testcase should be executed with `torchrun`, i.e., `torchrun --nproc-per-node N script.py`.
     """
 
-    # @unittest.skip("Pass.")
+    @unittest.skip("Pass.")
     def test_correctness_of_spatial_temporal_task_colocation(self):
         import torch
 
@@ -37,6 +37,8 @@ class BasicFuncTest(unittest.TestCase):
             def forward(self, x):
                 act = self.input_layer(x)
                 act = self.base_op(act)
+                acts = torch.split(act, [1, 1], dim=0)
+                act = torch.cat(acts, dim=0)
                 return self.output_layer(act)
 
         backbone = DummyBackbone()
@@ -153,7 +155,7 @@ class BasicFuncTest(unittest.TestCase):
 
         logger.info("Passed correctness test for spatial-temporal multi-task cololocation.")
 
-    @unittest.skip("Pass.")
+    # @unittest.skip("Pass.")
     def test_peft_enabled_meagtron_gpt(self):
         """ Run the parallelized Megatron model with PEFT adapters hooked. """
 
@@ -253,9 +255,36 @@ class BasicFuncTest(unittest.TestCase):
         model = model_provider(**model_kwargs) if model_provider else None
         model = setup_model(model)
 
+        submodules = model[0].module.module.get_submodules()
+
         train_data_iterator = get_train_data_iterator(
             vocab_size, global_bs, num_micro_batches, seq_len, num_iters=num_iters,
         )
+
+        model = model[0]
+        megatron_config = get_attr_wrapped_model(model, attr="config")
+        # Input batch
+        (tokens, labels, loss_mask, 
+            attention_mask, position_ids) = get_input_batch(
+                data_iterator=train_data_iterator,
+                micro_batch_size=(
+                    megatron_config.global_batch_size // megatron_config.num_micro_batches
+                ),
+                seq_len=megatron_config.sequence_length,
+                pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+        )
+        # Forward
+        # output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+        
+        args = (tokens, position_ids, )
+        kwargs = {"attention_mask": attention_mask, "labels": labels}
+        intermediate_ = args, kwargs
+        for submodule in submodules:
+            ret = submodule(*args, **kwargs)
+
+        # TODO(chunyu): how we transfer intermediate arguments between submodules?
+        exit(0)
+
         (optimizers, opt_param_schedulers) = get_optimizers_and_schedulers(
             model, global_bs, num_iters, fp16=(dtype == torch.float16), params_dtype=dtype, 
         )

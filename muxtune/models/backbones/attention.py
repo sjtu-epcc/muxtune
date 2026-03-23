@@ -5,7 +5,7 @@
 """ Megatron attention modules. """
 
 import os
-from typing import Any, Dict, Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple, Callable
 import math
 
 import torch
@@ -85,6 +85,12 @@ class SelfAttention(MegatronModule):
             input_is_parallel=True,
             skip_bias_add=False,
         )
+
+        self.attn_qkv_split_module = AttnQKVSplitModule(
+            self.num_query_groups_per_partition, self.num_attention_heads_per_partition, 
+            self.hidden_size_per_attention_head, True, self.q_layernorm, self.k_layernorm,
+        )
+        self.core_attn_module = CoreAttnModule(self.core_attention, self.attn_mask_type)
     
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None, split_qkv=True):
         """
@@ -182,6 +188,15 @@ class SelfAttention(MegatronModule):
         output, bias = self.linear_proj(core_attn_out)
 
         return output, bias
+    
+    def get_submodules(self):
+        """ Get sub-modules after graph partitioning. """
+        submodules = []
+        submodules.extend(self.linear_qkv.get_submodules())
+        submodules.append(self.attn_qkv_split_module)
+        submodules.append(self.core_attn_module)
+        submodules.extend(self.linear_proj.get_submodules())
+        return submodules
 
 
 class DotProductAttention(MegatronModule):
@@ -365,3 +380,83 @@ class DotProductAttention(MegatronModule):
         context = context.view(*new_context_shape)
 
         return context
+
+
+class AttnQKVSplitModule(torch.nn.Module):
+    
+    module_type = "compute"
+
+    def __init__(
+        self, 
+        num_query_groups_per_partition: int, 
+        num_attention_heads_per_partition: int,
+        hidden_size_per_attention_head: int,
+        split_qkv: bool = True,
+        q_layernorm: Callable = None,
+        k_layernorm: Callable = None,
+    ):
+        super().__init__()
+        self.num_query_groups_per_partition = num_query_groups_per_partition
+        self.num_attention_heads_per_partition = num_attention_heads_per_partition
+        self.hidden_size_per_attention_head = hidden_size_per_attention_head
+        self.split_qkv = split_qkv
+        self.q_layernorm = q_layernorm
+        self.k_layernorm = k_layernorm
+    
+    def forward(self, mixed_qkv: torch.Tensor, *args, **kwargs):
+        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
+        new_tensor_shape = mixed_qkv.size()[:-1] + (
+            self.num_query_groups_per_partition,
+            (
+                (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
+                * self.hidden_size_per_attention_head
+            ),
+        )
+        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+
+        split_arg_list = [
+            (
+                self.num_attention_heads_per_partition
+                // self.num_query_groups_per_partition
+                * self.hidden_size_per_attention_head
+            ),
+            self.hidden_size_per_attention_head,
+            self.hidden_size_per_attention_head,
+        ]
+
+        # Return unsplit mixed_qkv and split_arg_list
+        if not self.split_qkv:
+            return mixed_qkv, split_arg_list
+        
+        # [sq, b, ng, (np/ng + 2) * hn]
+        # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+        (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
+
+        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
+        query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
+
+        if self.q_layernorm is not None:
+            query = self.q_layernorm(query)
+
+        if self.k_layernorm is not None:
+            key = self.k_layernorm(key)
+        
+        return query, key, value, args, kwargs
+
+
+class CoreAttnModule(torch.nn.Module):
+
+    module_type = "compute"
+
+    def __init__(
+        self, 
+        core_attention: DotProductAttention, 
+        attn_mask_type: str,
+    ):
+        super().__init__()
+        self.core_attention = core_attention
+        self.attn_mask_type = attn_mask_type
+    
+    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, *args, **kwargs):
+        attention_mask = kwargs.get("attention_mask", None)
+        return self.core_attention(query, key, value, attention_mask, self.attn_mask_type), args, kwargs
