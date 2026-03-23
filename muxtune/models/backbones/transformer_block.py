@@ -43,9 +43,11 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
-        self.pre_process_module = TransformerBlockPreProcessModule(self.pre_process)
+        self.pre_process_module = TransformerBlockPreProcessModule(
+            ["hidden_states", ], ["hidden_states", ], self.pre_process)
         self.final_layernorm_module = FinalLayerNormModule(
-            self.final_layernorm, self.pre_process, self.layers)
+            ["hidden_states", ], ["hidden_states", ], self.final_layernorm, 
+            self.pre_process, self.layers)
 
     def _build_layers(self):
         if global_configs.pipeline_model_parallel_size > 1:
@@ -189,16 +191,14 @@ class TransformerBlockPreProcessModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, pre_process: bool):
-        super().__init__()
+    def __init__(self, input_keywords: List[str], output_keywords: List[str], 
+                 pre_process: bool):
+        super().__init__(input_keywords, output_keywords)
         self.pre_process = pre_process
         self.input_tensor = None
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        hidden_states = intermediate_.pop("hidden_states")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (hidden_states, ) = self.preprocess(intermediate_)
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
@@ -223,8 +223,7 @@ class TransformerBlockPreProcessModule(SubModuleBase):
         #   already creates viewless tensors. That said, make_viewless_tensor()
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
-        intermediate_["hidden_states"] = hidden_states
-        return intermediate_
+        return self.postprocess(intermediate_, [hidden_states, ])
 
 
 class FinalLayerNormModule(SubModuleBase):
@@ -232,19 +231,17 @@ class FinalLayerNormModule(SubModuleBase):
     module_type = "compute"
 
     def __init__(
-        self, final_layernorm: torch.nn.LayerNorm, pre_process: bool, 
+        self, input_keywords: List[str], output_keywords: List[str], 
+        final_layernorm: torch.nn.LayerNorm, pre_process: bool, 
         layers: List[TransformerLayer],
     ):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.final_layernorm = final_layernorm
         self.pre_process = pre_process
         self.layers = layers
 
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        hidden_states = intermediate_.pop("hidden_states")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (hidden_states, ) = self.preprocess(intermediate_)
         if self.final_layernorm is not None:
             hidden_states = self.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
@@ -256,6 +253,5 @@ class FinalLayerNormModule(SubModuleBase):
         
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
-        
-        intermediate_["hidden_states"] = hidden_states
-        return intermediate_
+
+        return self.postprocess(intermediate_, [hidden_states, ])

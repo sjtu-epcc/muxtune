@@ -89,7 +89,8 @@ class MLP(MegatronModule):
             is_expert=is_expert,
         )
 
-        self.act_module = MLPActModule(self.activation_func)
+        self.act_module = MLPActModule(
+            ["hidden_states", ], ["hidden_states", ], self.activation_func)
     
     def forward(self, hidden_states, per_token_scale=None):
         """ Forward method. """
@@ -130,15 +131,12 @@ class MLPActModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, activation_func: Callable):
-        super().__init__()
+    def __init__(self, input_keywords: List[str], output_keywords: List[str], 
+                 activation_func: Callable):
+        super().__init__(input_keywords, output_keywords)
         self.activation_func = activation_func
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        input_ = intermediate_.pop("hidden_states")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (input_, ) = self.preprocess(intermediate_)
         output_ = self.activation_func(input_)
-        intermediate_["hidden_states"] = output_
-        return intermediate_
+        return self.postprocess(intermediate_, [output_, ])

@@ -115,11 +115,14 @@ class GPTModel(LanguageModule):
         embedding = self.embedding if self.pre_process else None
         output_layer_weight = self.output_layer.weight if post_process else None
         self.pre_process_module = GPTModelPreProcessModule(
+            ["input_ids", "position_ids", "decoder_input", ], ["hidden_states", ], 
             embedding, self.pre_process, self.config.params_dtype)
         self.post_process_module = GPTModelPostProcessModule(
-            embedding, output_layer_weight, self.share_embeddings_and_output_weights, 
+            ["hidden_states", ], ["hidden_states", "output_weight", ], embedding, 
+            output_layer_weight, self.share_embeddings_and_output_weights, 
             self.pre_process, self.post_process)
-        self.compute_loss_module = ComputeLossModule() if self.post_process else None
+        self.compute_loss_module = ComputeLossModule(["logits", "labels", ], ["loss"]) \
+            if self.post_process else None
     
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Sets input tensor to the model.
@@ -211,7 +214,8 @@ class GPTModel(LanguageModule):
         if not self.post_process:
             return hidden_states
         
-        logits, _ = self.output_layer(hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output)
+        logits, _ = self.output_layer(hidden_states, weight=output_weight, 
+                                      runtime_gather_output=runtime_gather_output)
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
@@ -279,20 +283,16 @@ class GPTModelPreProcessModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, embedding: LanguageModelEmbedding, pre_process: bool, 
+    def __init__(self, input_keywords: List[str], output_keywords: List[str], 
+                 embedding: LanguageModelEmbedding, pre_process: bool, 
                  params_dtype: torch.dtype):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.embedding = embedding
         self.pre_process = pre_process
         self.params_dtype = params_dtype
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["input_ids", "position_ids", "decoder_input", ],
-    ):
-        input_ids = intermediate_.pop("input_ids")
-        position_ids = intermediate_.pop("position_ids")
-        decoder_input = intermediate_.pop("decoder_input")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (input_ids, position_ids, decoder_input) = self.preprocess(intermediate_)
         # Decoder embedding.
         if decoder_input is not None:
             pass
@@ -307,8 +307,7 @@ class GPTModelPreProcessModule(SubModuleBase):
         if decoder_input is not None and decoder_input.dtype != self.params_dtype:
             decoder_input = decoder_input.to(self.params_dtype)
 
-        intermediate_["hidden_states"] = decoder_input
-        return intermediate_
+        return self.postprocess(intermediate_, [decoder_input, ], )
 
 
 class GPTModelPostProcessModule(SubModuleBase):
@@ -317,24 +316,23 @@ class GPTModelPostProcessModule(SubModuleBase):
 
     def __init__(
         self, 
+        input_keywords: List[str], 
+        output_keywords: List[str], 
         embedding: LanguageModelEmbedding,
         output_layer_weight: torch.Tensor,
         share_embeddings_and_output_weights: bool,
         pre_process: bool,
         post_process: bool,
     ):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.embedding = embedding
         self.output_layer_weight = output_layer_weight
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.pre_process =pre_process
         self.post_process = post_process
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        hidden_states = intermediate_.pop("hidden_states")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (hidden_states, ) = self.preprocess(intermediate_)
         output_weight = None
         if self.share_embeddings_and_output_weights:
             if self.pre_process:
@@ -350,25 +348,19 @@ class GPTModelPostProcessModule(SubModuleBase):
                 output_weight = self.output_layer_weight
             else:
                 output_weight = None
-
-        intermediate_["hidden_states"] = hidden_states
-        intermediate_["output_weight"] = output_weight
-        return intermediate_
+        
+        return self.postprocess(intermediate_, [hidden_states, output_weight, ])
 
 
 class ComputeLossModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, ):
-        super().__init__()
+    def __init__(self, input_keywords: List[str], output_keywords: List[str]):
+        super().__init__(input_keywords, output_keywords)
 
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["logits", "labels", ],
-    ):
-        logits = intermediate_.pop("logits")
-        labels = intermediate_.pop("labels", None)
+    def forward(self, intermediate_: Dict[str, Any]):
+        (logits, labels) = self.preprocess(intermediate_)
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
@@ -382,5 +374,4 @@ class ComputeLossModule(SubModuleBase):
 
         # [s b] => [b, s]
         # loss = loss.transpose(0, 1).contiguous()
-        intermediate_["loss"] = loss
-        return intermediate_
+        return self.postprocess(intermediate_, [loss, ])

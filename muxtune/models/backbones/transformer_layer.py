@@ -76,13 +76,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
-        self.input_layernorm_module = InputLayerNormModule(self.input_layernorm)
+        self.input_layernorm_module = InputLayerNormModule(
+            ["hidden_states"], ["hidden_states", "residual", ], self.input_layernorm)
         self.attn_bias_dropout_add_module = BiasDropoutAddModule(
+            ["hidden_states", "bias", "residual", ], ["hidden_states", ],
             self.bias_dropout_add_exec_handler, self.self_attn_bda, self.training, 
             self.config.bias_dropout_fusion, self.hidden_dropout,
         )
-        self.pre_mlp_layernorm_module = PreMlpLayerNormModule(self.pre_mlp_layernorm)
+        self.pre_mlp_layernorm_module = PreMlpLayerNormModule(
+            ["hidden_states"], ["hidden_states", "residual", ], self.pre_mlp_layernorm)
         self.mlp_bias_dropout_add_module = BiasDropoutAddModule(
+            ["hidden_states", "bias", "residual", ], ["hidden_states", ],
             self.bias_dropout_add_exec_handler, self.mlp_bda, self.training, 
             self.config.bias_dropout_fusion, self.hidden_dropout,
         )
@@ -217,62 +221,52 @@ class InputLayerNormModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, input_layernorm: torch.nn.LayerNorm):
-        super().__init__()
+    def __init__(self, input_keywords: List[str], output_keywords: List[str], 
+                 input_layernorm: torch.nn.LayerNorm):
+        super().__init__(input_keywords, output_keywords)
         self.input_layernorm = input_layernorm
 
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        input_ = intermediate_.pop("hidden_states")
-        intermediate_["residual"] = input_
+    def forward(self, intermediate_: Dict[str, Any]):
+        (input_, ) = self.preprocess(intermediate_)
+        residual = input_
         output_ = self.input_layernorm(input_)
-        intermediate_["hidden_states"] = output_
-        return intermediate_
+        return self.postprocess(intermediate_, [output_, residual, ])
 
 
 class PreMlpLayerNormModule(SubModuleBase):
 
     module_type = "compute"
 
-    def __init__(self, pre_mlp_layernorm: torch.nn.LayerNorm):
-        super().__init__()
+    def __init__(self, input_keywords: List[str], output_keywords: List[str], 
+                 pre_mlp_layernorm: torch.nn.LayerNorm):
+        super().__init__(input_keywords, output_keywords)
         self.pre_mlp_layernorm = pre_mlp_layernorm
 
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        input_ = intermediate_.pop("hidden_states")
-        intermediate_["residual"] = input_
+    def forward(self, intermediate_: Dict[str, Any]):
+        (input_, ) = self.preprocess(intermediate_)
+        residual = input_
         output_ = self.pre_mlp_layernorm(input_)
-        intermediate_["hidden_states"] = output_
-        return intermediate_
+        return self.postprocess(intermediate_, [output_, residual, ])
 
 
-class BiasDropoutAddModule(torch.nn.Module):
+class BiasDropoutAddModule(SubModuleBase):
 
     module_type = "compute"
 
     def __init__(
-        self, bias_dropout_add_exec_handler: Any, bda: Callable, 
+        self, input_keywords: List[str], output_keywords: List[str], 
+        bias_dropout_add_exec_handler: Any, bda: Callable, 
         training: bool, bias_dropout_fusion: bool, hidden_dropout: float,
     ):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.bias_dropout_add_exec_handler = bias_dropout_add_exec_handler
         self.bda = bda
         self.training = training
         self.bias_dropout_fusion = bias_dropout_fusion
         self.hidden_dropout = hidden_dropout
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        input_ = intermediate_.pop("hidden_states")
-        bias = intermediate_.pop("bias")
-        residual = intermediate_.pop("residual")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (input_, bias, residual, ) = self.preprocess(intermediate_)
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.bda(self.training, self.bias_dropout_fusion)(
                 (input_, bias), residual, self.hidden_dropout,
@@ -287,5 +281,4 @@ class BiasDropoutAddModule(torch.nn.Module):
         output_ = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
-        intermediate_["hidden_states"] = output_
-        return intermediate_
+        return self.postprocess(intermediate_, [output_, ])

@@ -88,10 +88,14 @@ class SelfAttention(MegatronModule):
         )
 
         self.attn_qkv_split_module = AttnQKVSplitModule(
+            ["hidden_states", ], ["query", "key", "value", ],
             self.num_query_groups_per_partition, self.num_attention_heads_per_partition, 
             self.hidden_size_per_attention_head, True, self.q_layernorm, self.k_layernorm,
         )
-        self.core_attn_module = CoreAttnModule(self.core_attention, self.attn_mask_type)
+        self.core_attn_module = CoreAttnModule(
+            ["query", "key", "value", "attention_mask", ], ["hidden_states", "attention_mask", ], 
+            self.core_attention, self.attn_mask_type,
+        )
     
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None, split_qkv=True):
         """
@@ -389,6 +393,8 @@ class AttnQKVSplitModule(SubModuleBase):
 
     def __init__(
         self, 
+        input_keywords: List[str], 
+        output_keywords: List[str], 
         num_query_groups_per_partition: int, 
         num_attention_heads_per_partition: int,
         hidden_size_per_attention_head: int,
@@ -396,7 +402,7 @@ class AttnQKVSplitModule(SubModuleBase):
         q_layernorm: Callable = None,
         k_layernorm: Callable = None,
     ):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.num_query_groups_per_partition = num_query_groups_per_partition
         self.num_attention_heads_per_partition = num_attention_heads_per_partition
         self.hidden_size_per_attention_head = hidden_size_per_attention_head
@@ -404,11 +410,8 @@ class AttnQKVSplitModule(SubModuleBase):
         self.q_layernorm = q_layernorm
         self.k_layernorm = k_layernorm
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["hidden_states", ],
-    ):
-        mixed_qkv = intermediate_.pop("hidden_states")
+    def forward(self, intermediate_: Dict[str, Any]):
+        (mixed_qkv, ) = self.preprocess(intermediate_)
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = mixed_qkv.size()[:-1] + (
             self.num_query_groups_per_partition,
@@ -447,11 +450,8 @@ class AttnQKVSplitModule(SubModuleBase):
 
         if self.k_layernorm is not None:
             key = self.k_layernorm(key)
-        
-        intermediate_["query"] = query
-        intermediate_["key"] = key
-        intermediate_["value"] = value
-        return intermediate_
+
+        return self.postprocess(intermediate_, [query, key, value, ])
 
 
 class CoreAttnModule(SubModuleBase):
@@ -460,21 +460,16 @@ class CoreAttnModule(SubModuleBase):
 
     def __init__(
         self, 
+        input_keywords: List[str], 
+        output_keywords: List[str], 
         core_attention: DotProductAttention, 
         attn_mask_type: str,
     ):
-        super().__init__()
+        super().__init__(input_keywords, output_keywords)
         self.core_attention = core_attention
         self.attn_mask_type = attn_mask_type
     
-    def forward(
-        self, intermediate_: Dict[str, Any], 
-        input_keywords: List[str] = ["query", "key", "value", ],
-    ):
-        query = intermediate_.pop("query")
-        key = intermediate_.pop("key")
-        value = intermediate_.pop("value")
-        attention_mask = intermediate_["attention_mask"]    # persistant
+    def forward(self, intermediate_: Dict[str, Any]):
+        (query, key, value, attention_mask, ) = self.preprocess(intermediate_)
         output_ = self.core_attention(query, key, value, attention_mask, self.attn_mask_type)
-        intermediate_["hidden_states"] = output_
-        return intermediate_
+        return self.postprocess(intermediate_, [output_, attention_mask])
